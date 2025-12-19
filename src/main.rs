@@ -1,4 +1,6 @@
 mod menu;
+mod parser;
+
 use pcap::{Capture, Device};
 fn main() {
     println!("Welcome to the Packet Sniffer Configuration Interface.");
@@ -21,11 +23,24 @@ fn main() {
     use pcap::{Capture, Device};
 
     let devices = Device::list().expect("Error listing devices");
+    println!("Devices: {:?}", devices);
 
-    let main_device = devices.first().expect("No device found").clone();
+    let main_device = devices.into_iter().find(|d| {
+        let desc = d.desc.as_deref().unwrap_or("");
+
+        let is_physical = !desc.contains("Hyper-V") &&
+            !desc.contains("Virtual") &&
+            !desc.contains("Loopback");
+
+        let is_connected = d.flags.connection_status == pcap::ConnectionStatus::Connected;
+
+        is_physical && is_connected
+    }).expect("No physical network card found!");
+
+
     println!("Starting capture on: {}", main_device.name);
 
-    // 2. Open the device for sniffing [cite: 15]
+
     let mut cap = Capture::from_device(main_device)
         .unwrap()
         .promisc(true) // Capture all traffic in the LAN, not just yours
@@ -35,12 +50,20 @@ fn main() {
         .unwrap();
 
     println!("Waiting for packets...");
-    while let Ok(packet) = cap.next_packet() {
-        println!("Packet received! Length: {} bytes", packet.header.len);
-        println!("{:?}", packet);
-        println!("Hex Data: {:02X?}", &packet.data[0..14]);
-        // parse_ethernet(packet.data);
+    loop {
+        match cap.next_packet() {
+            Ok(packet) => {
+                // Your existing logic here
+                parser::handle_packet(&packet.data);
+            }
+            Err(pcap::Error::TimeoutExpired) => {
+                // might happen that timeout occurs when many packets are received
+                continue;
+            }
+            Err(e) => {
+                eprintln!("PCAP Error: {:?}", e);
+            }
+        }
     }
 
-    println!("Ending program");
 }
