@@ -3,5 +3,12 @@
 version = 4
 
 [[package]]
+name = "bindings"
+version = "0.1.0"
+
+[[package]]
 name = "rust_sniffer"
 version = "0.1.0"
+dependencies = [
+ "bindings",
+]
