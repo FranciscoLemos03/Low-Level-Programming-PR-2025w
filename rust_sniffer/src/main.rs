@@ -62,6 +62,7 @@ unsafe extern "C" fn packet_handler(
         slice::from_raw_parts(pkt_data, (*header).len as usize).to_vec() 
     };
 
+    // TODO: somehow pass this packet var into other functions
     let packet = unsafe {
         Packet {
             data: packet_vec,
