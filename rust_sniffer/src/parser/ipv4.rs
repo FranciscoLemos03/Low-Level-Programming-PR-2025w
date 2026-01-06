@@ -1,3 +1,5 @@
+use crate::parser::{tcp, udp};
+
 pub fn parse(data: &[u8]) {
     if data.len() < 20 { return; }
 
@@ -21,10 +23,10 @@ pub fn parse(data: &[u8]) {
 
     // Peeling further: The payload starts after 'header_len'
     if data.len() > header_len {
-        let _payload = &data[header_len..];
+        let payload = &data[header_len..];
         match protocol {
-            6 => { /* parse_tcp(payload) */ },
-            17 => { /* parse_udp(payload) */ },
+            6 => tcp::parse(payload),
+            17 => udp::parse(payload),
             _ => {}
         }
     }

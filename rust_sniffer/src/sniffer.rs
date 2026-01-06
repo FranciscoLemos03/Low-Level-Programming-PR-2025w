@@ -11,6 +11,7 @@ use bindings::{
     pcap_pkthdr,
     u_char,
 };
+use crate::parser;
 
 /// Timestamp (seconds + microseconds)
 pub struct TimeVal {
@@ -81,75 +82,13 @@ unsafe extern "C" fn packet_handler(
         return;
     }
 
-    let packet_vec = unsafe {
-        copy_packet_data(pkt_data, (*header).len as usize)
-    };
+    let len = (*header).len as usize;
+    let data_slice = unsafe { slice::from_raw_parts(pkt_data, len) };
 
-    let packet = Packet {
-        data: packet_vec,
-        ts: TimeVal {
-            sec: (*header).ts.tv_sec as u32,
-            usec: (*header).ts.tv_usec as u32,
-        },
-    };
+    let sec = (*header).ts.tv_sec as u32;
+    print!("[Time: {}.{}] ", sec, (*header).ts.tv_usec);
 
-    // Ethernet (14) + IPv4 minimum (20)
-    if packet.data.len() < 34 {
-        return;
-    }
-
-    // EtherType (bytes 12..14)
-    let ethertype = u16::from_be_bytes([packet.data[12], packet.data[13]]);
-    if ethertype != 0x0800 {
-        return; // not IPv4
-    }
-
-    // IPv4 header length (IHL * 4)
-    let ihl = packet.data[14] & 0x0F;
-    let ip_header_len = (ihl as usize) * 4;
-
-    let transport_offset = 14 + ip_header_len;
-    if packet.data.len() < transport_offset + 4 {
-        return;
-    }
-
-    // IP addresses
-    let src_ip = ipv4_to_string(&packet.data[26..30]);
-    let dst_ip = ipv4_to_string(&packet.data[30..34]);
-
-    let protocol_num = packet.data[23];
-    let protocol = protocol_to_string(protocol_num);
-
-    // Default ports (for non TCP/UDP)
-    let mut src_port = "-".to_string();
-    let mut dst_port = "-".to_string();
-
-    // TCP or UDP → extract ports
-    if protocol_num == 6 || protocol_num == 17 {
-        let sp = u16::from_be_bytes([
-            packet.data[transport_offset],
-            packet.data[transport_offset + 1],
-        ]);
-        let dp = u16::from_be_bytes([
-            packet.data[transport_offset + 2],
-            packet.data[transport_offset + 3],
-        ]);
-
-        src_port = sp.to_string();
-        dst_port = dp.to_string();
-    }
-
-    println!(
-        "[{}, {}, {}, {}, {}, {}, {}, {}]",
-        packet.ts.sec,
-        packet.ts.usec,
-        packet.data.len(),
-        src_ip,
-        dst_ip,
-        protocol,
-        src_port,
-        dst_port
-    );
+    parser::handle_packet(data_slice);
 }
 
 /* ------------------------------------------------------------------------- */

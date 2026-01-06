@@ -1,5 +1,6 @@
 mod sniffer;
 mod menu;
+mod parser;
 
 fn main() {
     println!("Started");
