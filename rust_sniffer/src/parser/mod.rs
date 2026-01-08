@@ -4,6 +4,9 @@ mod ipv4;
 mod tcp;
 mod udp;
 mod dns;
+mod icmp;
+mod smtp;
+mod http;
 
 pub fn handle_packet(data: &[u8]) {
     ethernet::parse(data);

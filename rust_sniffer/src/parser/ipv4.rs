@@ -1,7 +1,9 @@
-use crate::parser::{tcp, udp};
+use crate::parser::{icmp, tcp, udp};
 
 pub fn parse(data: &[u8]) {
-    if data.len() < 20 { return; }
+    if data.len() < 20 {
+        return;
+    }
 
     // First byte: Version (4 bits) and IHL (4 bits)
     let version = data[0] >> 4;
@@ -15,16 +17,24 @@ pub fn parse(data: &[u8]) {
     let src_ip = &data[12..16];
     let dst_ip = &data[16..20];
 
-    println!("  [IPv4] {}.{}.{}.{} -> {}.{}.{}.{} | Proto: {}",
-             src_ip[0], src_ip[1], src_ip[2], src_ip[3],
-             dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3],
-             protocol
+    println!(
+        "  [IPv4] {}.{}.{}.{} -> {}.{}.{}.{} | Proto: {}",
+        src_ip[0],
+        src_ip[1],
+        src_ip[2],
+        src_ip[3],
+        dst_ip[0],
+        dst_ip[1],
+        dst_ip[2],
+        dst_ip[3],
+        protocol
     );
 
     // Peeling further: The payload starts after 'header_len'
     if data.len() > header_len {
         let payload = &data[header_len..];
         match protocol {
+            1 => icmp::parse(payload),
             6 => tcp::parse(payload),
             17 => udp::parse(payload),
             _ => {}
