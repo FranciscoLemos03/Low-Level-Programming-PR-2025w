@@ -1,4 +1,4 @@
-use crate::parser::{arp, ipv4};
+use crate::parser::{arp, ipv4, ipv6};
 
 pub fn parse(data: &[u8]) {
     if data.len() < 14 { return; }
@@ -16,6 +16,7 @@ pub fn parse(data: &[u8]) {
     match ether_type {
         0x0800 => ipv4::parse(payload),
         0x0806 => arp::parse(payload),
+        0x86DD => ipv6::parse(&data[14..]),
         _ => {} // Ignore or log unknown types
     }
 }
