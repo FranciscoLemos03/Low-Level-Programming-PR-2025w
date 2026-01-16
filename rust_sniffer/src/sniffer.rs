@@ -1,5 +1,10 @@
 use std::{ffi::CStr, ptr::null_mut, slice};
-
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::thread;
+use crossterm::event::{read, Event, KeyCode, KeyEvent, KeyModifiers};
 use bindings::{
     pcap_if_t,
     pcap_findalldevs_ex,
@@ -7,10 +12,10 @@ use bindings::{
     pcap_freealldevs,
     PCAP_OPENFLAG_PROMISCUOUS,
     pcap_open,
-    pcap_loop,
     pcap_pkthdr,
     u_char,
-};
+    pcap_breakloop,
+    pcap_dispatch};
 use crate::parser;
 
 /// Timestamp (seconds + microseconds)
@@ -96,7 +101,7 @@ unsafe extern "C" fn packet_handler(
 /* ------------------------------------------------------------------------- */
 
 pub fn list_adapters() -> Vec<String> {
-    let mut adapters = Vec::new();
+    let mut adapters : Vec<String> = Vec::new();
 
     let mut errbuf = [0 as ::std::os::raw::c_char; 256];
     let errbuf_ptr = errbuf.as_mut_ptr();
@@ -200,7 +205,29 @@ pub fn read_packets(adapter_index: u8) {
 
     println!("Starting listening on the adapter.");
 
+    let running = Arc::new(AtomicBool::new(true));
+    let running_key = running.clone();
+
+    println!("Press Crtl+Q to stop listening.");
+    thread::spawn(move || {
+        while running_key.load(Ordering::Relaxed) {
+            if let Ok(Event::Key(KeyEvent { code, modifiers, .. })) = read() {
+                if code == KeyCode::Char('q') && modifiers.contains(KeyModifiers::CONTROL) {
+                    println!("Ctrl+Q pressed!");
+                    running_key.store(false, Ordering::Relaxed);
+                }
+            }
+        }
+    });
+
+    while running.load(Ordering::Relaxed) {
+        unsafe {
+            pcap_dispatch(handle, 0, Some(packet_handler), null_mut());
+        }
+    }
+
     unsafe {
-        pcap_loop(handle, 0, Some(packet_handler), null_mut());
+        pcap_breakloop(handle);
+        println!("Stopping listening on the adapter.");
     }
 }
