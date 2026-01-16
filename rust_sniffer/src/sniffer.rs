@@ -12,6 +12,7 @@ use bindings::{
     u_char,
 };
 use crate::parser;
+use crate::analyzer;
 
 /// Timestamp (seconds + microseconds)
 pub struct TimeVal {
