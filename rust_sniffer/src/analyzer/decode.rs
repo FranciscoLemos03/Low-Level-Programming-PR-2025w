@@ -31,6 +31,7 @@ pub struct PacketEvent<'a> {
 /// Decode only what needed for flow tracking
 /// FOR NOW: Returns None if it's not Eth+IPv4+TCP
 pub fn decode_ipv4_tcp<'a>(ts_ms: u128, data: &'a [u8]) -> Option<PacketEvent<'a>> {
+    println!("Testing 0");
     /*
     data[..6]   : dest MAC
     data[6..12] : src MAC
@@ -41,6 +42,11 @@ pub fn decode_ipv4_tcp<'a>(ts_ms: u128, data: &'a [u8]) -> Option<PacketEvent<'a
     }
     let ether_type = u16::from_be_bytes([data[12], data[13]]);
     
+    // !!! Currently assuming everything is Ethernet !!!
+    // TODO: Add `match datalink { 1 => decode_eth, 0 => decode raw ipv4 tcp, ... }`
+    // NOTE: Loopback adapter (8) fails here => use 5
+    // (8) doesn't have physical link layer
+    // ==> Elif linktype == Loopback => Parse IP Directly
     // IPv4 
     if ether_type != 0x0800 {
         return None;

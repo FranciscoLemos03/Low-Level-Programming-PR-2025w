@@ -1,5 +1,6 @@
 use std::{ffi::CStr, ptr::null_mut, slice};
 
+use bindings::pcap_datalink;
 use bindings::{
     pcap_if_t,
     pcap_findalldevs_ex,
@@ -86,8 +87,20 @@ unsafe extern "C" fn packet_handler(
     let len = (*header).len as usize;
     let data_slice = unsafe { slice::from_raw_parts(pkt_data, len) };
 
-    let sec = (*header).ts.tv_sec as u32;
+    // pcap timestamp: seconds + microseconds
+    let sec = (*header).ts.tv_sec as u128;
+    let usec = (*header).ts.tv_usec as u128;
+    let ts_ms = sec * 1000 + (usec / 1000);
+
     print!("[Time: {}.{}] ", sec, (*header).ts.tv_usec);
+
+    // Update connection tracking
+    if let Some(ev) = analyzer::decode::decode_ipv4_tcp(ts_ms, data_slice) {
+        // IMPORTANT: Analyzer must not store ev.payload since it's borrowed.
+        if let Ok(mut a) = analyzer::GLOBAL.lock() {
+            a.on_packet(ev);
+        }
+    }
 
     parser::handle_packet(data_slice);
 }
@@ -198,6 +211,9 @@ pub fn read_packets(adapter_index: u8) {
         );
         return;
     }
+
+    let dl = unsafe { pcap_datalink(handle) };
+    println!("pcap_datalink = {}", dl);
 
     println!("Starting listening on the adapter.");
 
