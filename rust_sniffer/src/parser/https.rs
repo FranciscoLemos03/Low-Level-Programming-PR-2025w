@@ -1,6 +1,5 @@
 pub fn parse(payload: &[u8]) {
     if payload.len() < 5 {
-        println!("    [HTTPS] Payload too short ({} bytes)", payload.len());
         return;
     }
 

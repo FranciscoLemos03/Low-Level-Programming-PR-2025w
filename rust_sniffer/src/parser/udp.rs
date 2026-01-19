@@ -51,12 +51,12 @@ fn identify_udp_application(src: u16, dst: u16, payload: &[u8]) {
     match (src, dst) {
         (67, 68) | (68, 67) => println!("      [DHCP] IP Assignment Protocol"),
         (123, _) | (_, 123) => println!("      [NTP] Network Time Protocol"),
+        (443, _) | (_, 443) => {
+            // We identify this as QUIC/HTTP3 based on the port and transport layer
+            println!("      [QUIC/HTTP3] Encrypted Connection");
+        },
         _ => {
-            let preview: String = payload.iter()
-                .take(32)
-                .map(|&b| if b >= 32 && b <= 126 { b as char } else { '.' })
-                .collect();
-            println!("      [Data] Preview: \"{}\"...", preview);
+            println!("      [UDP Data] {} bytes", payload.len());
         }
     }
 }
