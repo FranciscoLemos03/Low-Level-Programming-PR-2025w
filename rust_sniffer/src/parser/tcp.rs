@@ -1,6 +1,6 @@
 use crate::parser::{http, https, smtp};
 
-pub fn parse(data: &[u8]) {
+pub fn parse(data: &[u8], ttl: u8) {
     if data.len() < 20 {
         return;
     }
@@ -19,10 +19,11 @@ pub fn parse(data: &[u8]) {
     if flags & 0x04 != 0 { f.push("RST"); }
     if flags & 0x08 != 0 { f.push("PSH"); }
 
-    // Print the TCP summary for EVERY packet
+    let os_guess = guess_os(ttl, window_size, flags);
+
     println!(
-        "    [TCP] Port: {} -> {} | Win: {} | Flags: {:?}",
-        src_port, dst_port, window_size, f
+        "    [TCP] {} -> {} | Win: {} | OS Guess: {} (TTL: {}) | Flags: {:?}",
+        src_port, dst_port, window_size, os_guess, ttl, f
     );
 
 
@@ -44,5 +45,37 @@ pub fn parse(data: &[u8]) {
             }
             _ => println!("    [TCP Data] {} bytes", payload.len()),
         }
+    }
+}
+
+
+fn guess_os(ttl: u8, window_size: u16, flags: u8) -> String {
+    let is_syn = flags & 0x02 != 0 && flags & 0x10 == 0;
+
+    // 1. Identify OS Family by TTL Ceiling
+    let os_family = if ttl <= 64 {
+        match window_size {
+            64240 | 29200 | 5840 => "Linux (Modern Kernel)",
+            65535 => "FreeBSD/macOS",
+            _ => "Linux/Unix (Generic)"
+        }
+    } else if ttl <= 128 {
+        match window_size {
+            8192 => "Windows (Fixed Win)",
+            64240 | 65535 => "Windows (Autotuning)",
+            _ => "Windows (Generic)"
+        }
+    } else if ttl <= 255 {
+        "Network Device (Cisco/Solaris)"
+    } else {
+        "Unknown OS"
+    };
+
+    if is_syn {
+        os_family.to_string()
+    } else {
+        // If not a SYN packet, the OS family is still likely correct,
+        // but the specific sub-version (based on window) is less certain.
+        format!("{} (Est. Traffic)", os_family)
     }
 }
