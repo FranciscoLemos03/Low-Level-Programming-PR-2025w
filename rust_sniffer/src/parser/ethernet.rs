@@ -17,7 +17,7 @@ pub fn parse(data: &[u8]) {
         0x0800 => ipv4::parse(payload),
         0x0806 => arp::parse(payload),
         0x86DD => ipv6::parse(&data[14..]),
-        _ => {} // Ignore or log unknown types
+        _ => println!("  [Ethernet] Unknown Type: 0x{:04X}", ether_type),
     }
 }
 
