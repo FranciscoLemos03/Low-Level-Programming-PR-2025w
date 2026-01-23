@@ -18,6 +18,15 @@ use bindings::{
     pcap_dispatch};
 use crate::parser;
 
+#[derive(Debug)]
+pub struct FilterConfig {
+    pub protocol: &'static str,
+    pub src_ip: Option<String>,
+    pub dst_ip: Option<String>,
+}
+
+static mut FILTER: Option<FilterConfig> = None;
+
 /// Timestamp (seconds + microseconds)
 pub struct TimeVal {
     pub sec: u32,
@@ -91,9 +100,27 @@ unsafe extern "C" fn packet_handler(
     let data_slice = unsafe { slice::from_raw_parts(pkt_data, len) };
 
     let sec = (*header).ts.tv_sec as u32;
-    print!("[Time: {}.{}] ", sec, (*header).ts.tv_usec);
+    let usec = (*header).ts.tv_usec as u32;
 
-    parser::handle_packet(data_slice);
+    let proto = parser::get_protocol(data_slice);
+    let (src_ip, dst_ip) = parser::get_ips(data_slice);
+    let print = unsafe {
+        let f = &raw const FILTER;
+        match *f {
+            None => true,
+            Some(ref fc) => {
+                let proto_match = fc.protocol == "all" || proto.as_ref().map(|p| p == fc.protocol).unwrap_or(false);
+                let src_match = fc.src_ip.as_ref().map(|filter_ip| src_ip.as_ref() == Some(filter_ip)).unwrap_or(true);
+                let dst_match = fc.dst_ip.as_ref().map(|filter_ip| dst_ip.as_ref() == Some(filter_ip)).unwrap_or(true);
+                proto_match && src_match && dst_match
+            }
+        }
+    };
+
+    if print {
+        print!("[Time: {}.{}] ", sec, usec);
+        parser::handle_packet(data_slice);
+    }
 }
 
 /* ------------------------------------------------------------------------- */
@@ -142,7 +169,7 @@ pub fn print_adapters() {
     }
 }
 
-pub fn read_packets(adapter_index: u8) {
+pub fn read_packets(adapter_index: u8, filter: Option<FilterConfig>) {
     let mut errbuf = [0 as ::std::os::raw::c_char; 256];
     let errbuf_ptr = errbuf.as_mut_ptr();
 
@@ -202,6 +229,8 @@ pub fn read_packets(adapter_index: u8) {
         );
         return;
     }
+
+    unsafe { FILTER = filter; }
 
     println!("Starting listening on the adapter.");
 
