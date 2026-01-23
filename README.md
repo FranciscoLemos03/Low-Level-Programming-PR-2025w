@@ -24,7 +24,7 @@ A packet sniffer written in Rust that captures and analyzes network traffic in r
 
 1. Navigate to the project directory:
    ```bash
-   cd C:/Users/franc/Desktop/Low-Level-Programming-PR-2025w
+   cd /Low-Level-Programming-PR-2025w
    ```
 
 2. Build the project:
