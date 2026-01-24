@@ -1,3 +1,5 @@
+use crate::parser::dns;
+
 pub fn parse(data: &[u8]) {
     // Safety Check: Minimum UDP header is 8 bytes
     if data.len() < 8 { return; }
@@ -23,18 +25,38 @@ pub fn parse(data: &[u8]) {
 }
 
 fn identify_udp_application(src: u16, dst: u16, payload: &[u8]) {
+
+    if src == 53 || dst == 53 {
+        dns::parse(payload);
+        return;
+    }
+
+    // Fallback: heuristic DNS detection (catches randomized source port responses)
+    if payload.len() >= 12 {
+        let flags = u16::from_be_bytes([payload[2], payload[3]]);
+        let qr = (flags & 0x8000) != 0;          // QR bit = 1 for response
+        let opcode = (flags >> 11) & 0x0F;       // usually 0 (standard query)
+
+        let qdcount = u16::from_be_bytes([payload[4], payload[5]]);
+        let ancount = u16::from_be_bytes([payload[6], payload[7]]);
+
+        // Typical response pattern
+        if qr && opcode == 0 && qdcount == 1 && ancount >= 1 {
+            println!("      [DNS Response (heuristic match) — src port randomized?]");
+            dns::parse(payload);
+            return;
+        }
+    }
+
     match (src, dst) {
-        (53, _) | (_, 53) => {
-            crate::parser::dns::parse(payload);
-        },
         (67, 68) | (68, 67) => println!("      [DHCP] IP Assignment Protocol"),
         (123, _) | (_, 123) => println!("      [NTP] Network Time Protocol"),
+        (443, _) | (_, 443) => {
+            // We identify this as QUIC/HTTP3 based on the port and transport layer
+            println!("      [QUIC/HTTP3] Encrypted Connection");
+        },
         _ => {
-            let preview: String = payload.iter()
-                .take(32)
-                .map(|&b| if b >= 32 && b <= 126 { b as char } else { '.' })
-                .collect();
-            println!("      [Data] Preview: \"{}\"...", preview);
+            println!("      [UDP Data] {} bytes", payload.len());
         }
     }
 }

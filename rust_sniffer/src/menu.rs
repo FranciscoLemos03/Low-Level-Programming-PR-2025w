@@ -53,50 +53,98 @@ pub fn save_adapter_choice(adapter_index: usize, adapter_name: &str) {
     save_configuration(&config);
 }
 
-/* ---------------- FILTER / PROTOCOL MENU (DISABLED FOR NOW) ----------------
+/* ---------------- FILTER / PROTOCOL MENU ---------------- */
 
-pub fn menu() -> (String, String, String, String, String) {
-    let chosen_protocol = choose_protocol();
-    let (ip_filter_type_1, filtering_ip_1, ip_filter_type_2, filtering_ip_2) =
-        request_ip_filter();
-
-    let filter_details_2 = if ip_filter_type_2.is_empty() {
-        "".to_string()
-    } else {
-        format!(
-            "\nIP Filter Type 2: {}\nFiltering IP Address 2: {}",
-            ip_filter_type_2, filtering_ip_2
-        )
-    };
-
-    let configuration = format!(
-        "Selected Protocol: {}\nIP Filter Type 1: {}\nFiltering IP Address 1: {}{}",
-        chosen_protocol,
-        ip_filter_type_1,
-        filtering_ip_1,
-        filter_details_2
-    );
-
-    save_configuration(&configuration);
-
-    (
-        chosen_protocol,
-        ip_filter_type_1,
-        filtering_ip_1,
-        ip_filter_type_2,
-        filtering_ip_2,
-    )
+pub fn menu() -> sniffer::FilterConfig {
+    let protocol = choose_protocol();
+    let (src_ip, dst_ip) = choose_ip_filters();
+    
+    sniffer::FilterConfig {
+        protocol,
+        src_ip,
+        dst_ip,
+    }
 }
 
-fn choose_protocol() -> String {
-    unimplemented!()
+fn choose_protocol() -> &'static str {
+    loop {
+        println!("\n--- Choose Protocol Filter ---");
+        println!("0 - All traffic");
+        println!("1 - HTTP");
+        println!("2 - HTTPS");
+        println!("3 - DNS");
+        println!("4 - ICMP");
+        println!("5 - ARP");
+
+        let choice = read_input("Choose protocol (0-5): ");
+
+        match choice.as_str() {
+            "0" => return "all",
+            "1" => return "http",
+            "2" => return "https",
+            "3" => return "dns",
+            "4" => return "icmp",
+            "5" => return "arp",
+            _ => println!("❌ Invalid choice. Try again."),
+        }
+    }
 }
 
-fn request_ip_filter() -> (String, String, String, String) {
-    unimplemented!()
+fn choose_ip_filters() -> (Option<String>, Option<String>) {
+    loop {
+        println!("\n--- IP Filters ---");
+        println!("Do you want to filter by IP address? (y/n)");
+        
+        let choice = read_input("Choice: ").to_lowercase();
+        
+        match choice.as_str() {
+            "y" | "yes" => {
+                let src_ip = choose_ip("source");
+                let dst_ip = choose_ip("destination");
+                return (src_ip, dst_ip);
+            }
+            "n" | "no" => return (None, None),
+            _ => println!("❌ Please enter 'y' or 'n'."),
+        }
+    }
 }
 
------------------------------------------------------------------------- */
+fn choose_ip(ip_type: &str) -> Option<String> {
+    loop {
+        println!("\n--- {} IP Filter ---", ip_type);
+        println!("Enter {} IP address (or 'none' to skip): ", ip_type);
+        
+        let ip = read_input("IP: ");
+        
+        if ip.to_lowercase() == "none" {
+            return None;
+        }
+        
+        // Basic IP validation
+        if is_valid_ipv4(&ip) {
+            return Some(ip);
+        } else {
+            println!("❌ Invalid IPv4 address. Try again.");
+        }
+    }
+}
+
+fn is_valid_ipv4(ip: &str) -> bool {
+    let parts: Vec<&str> = ip.split('.').collect();
+    if parts.len() != 4 {
+        return false;
+    }
+    
+    for part in parts {
+        match part.parse::<u8>() {
+            Ok(_) => {},
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
+/* ---------------- END MENU ---------------- */
 
 /// Writes configuration text to a user-chosen file
 fn save_configuration(config: &str) {

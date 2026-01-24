@@ -10,6 +10,8 @@ pub fn parse(data: &[u8]) {
     let ihl = data[0] & 0x0F;
     let header_len = (ihl * 4) as usize;
 
+    let ttl = data[8];
+
     // Byte 9: Protocol (6 = TCP, 17 = UDP)
     let protocol = data[9];
 
@@ -18,7 +20,7 @@ pub fn parse(data: &[u8]) {
     let dst_ip = &data[16..20];
 
     println!(
-        "  [IPv4] {}.{}.{}.{} -> {}.{}.{}.{} | Proto: {}",
+        "  [IPv4] {}.{}.{}.{} -> {}.{}.{}.{} | TTL: {} | Proto: {}",
         src_ip[0],
         src_ip[1],
         src_ip[2],
@@ -27,6 +29,7 @@ pub fn parse(data: &[u8]) {
         dst_ip[1],
         dst_ip[2],
         dst_ip[3],
+        ttl,
         protocol
     );
 
@@ -35,7 +38,7 @@ pub fn parse(data: &[u8]) {
         let payload = &data[header_len..];
         match protocol {
             1 => icmp::parse(payload),
-            6 => tcp::parse(payload),
+            6 => tcp::parse(payload, ttl),
             17 => udp::parse(payload),
             _ => {}
         }

@@ -1,6 +1,10 @@
 use std::{ffi::CStr, ptr::null_mut, slice};
-
-use bindings::pcap_datalink;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::thread;
+use crossterm::event::{read, Event, KeyCode, KeyEvent, KeyModifiers};
 use bindings::{
     pcap_if_t,
     pcap_findalldevs_ex,
@@ -8,12 +12,20 @@ use bindings::{
     pcap_freealldevs,
     PCAP_OPENFLAG_PROMISCUOUS,
     pcap_open,
-    pcap_loop,
     pcap_pkthdr,
     u_char,
-};
+    pcap_breakloop,
+    pcap_dispatch};
 use crate::parser;
-use crate::analyzer;
+
+#[derive(Debug)]
+pub struct FilterConfig {
+    pub protocol: &'static str,
+    pub src_ip: Option<String>,
+    pub dst_ip: Option<String>,
+}
+
+static mut FILTER: Option<FilterConfig> = None;
 
 /// Timestamp (seconds + microseconds)
 pub struct TimeVal {
@@ -95,23 +107,28 @@ unsafe extern "C" fn packet_handler(
     let len = (*header).len as usize;
     let data_slice = unsafe { slice::from_raw_parts(pkt_data, len) };
 
-    // pcap timestamp: seconds + microseconds
-    let sec = (*header).ts.tv_sec as u128;
-    let usec = (*header).ts.tv_usec as u128;
-    let ts_ms = sec * 1000 + (usec / 1000);
+    let sec = (*header).ts.tv_sec as u32;
+    let usec = (*header).ts.tv_usec as u32;
 
-    print!("[Time: {}.{}] ", sec, (*header).ts.tv_usec);
-
-    // Update connection tracking
-    if let Some(ev) = analyzer::decode::decode_ipv4_tcp(ts_ms, data_slice, dl) {
-        // IMPORTANT: Analyzer must not store ev.payload since it's borrowed.
-        if let Ok(mut a) = analyzer::GLOBAL.lock() {
-            a.on_packet(ev);
+    let proto = parser::get_protocol(data_slice);
+    let (src_ip, dst_ip) = parser::get_ips(data_slice);
+    let print = unsafe {
+        let f = &raw const FILTER;
+        match *f {
+            None => true,
+            Some(ref fc) => {
+                let proto_match = fc.protocol == "all" || proto.as_ref().map(|p| p == fc.protocol).unwrap_or(false);
+                let src_match = fc.src_ip.as_ref().map(|filter_ip| src_ip.as_ref() == Some(filter_ip)).unwrap_or(true);
+                let dst_match = fc.dst_ip.as_ref().map(|filter_ip| dst_ip.as_ref() == Some(filter_ip)).unwrap_or(true);
+                proto_match && src_match && dst_match
+            }
         }
-    }
+    };
 
-    // Only parsing Ethernet currently
-    parser::handle_packet(data_slice);
+    if print {
+        print!("[Time: {}.{}] ", sec, usec);
+        parser::handle_packet(data_slice);
+    }
 }
 
 /* ------------------------------------------------------------------------- */
@@ -119,7 +136,7 @@ unsafe extern "C" fn packet_handler(
 /* ------------------------------------------------------------------------- */
 
 pub fn list_adapters() -> Vec<String> {
-    let mut adapters = Vec::new();
+    let mut adapters : Vec<String> = Vec::new();
 
     let mut errbuf = [0 as ::std::os::raw::c_char; 256];
     let errbuf_ptr = errbuf.as_mut_ptr();
@@ -160,7 +177,7 @@ pub fn print_adapters() {
     }
 }
 
-pub fn read_packets(adapter_index: u8) {
+pub fn read_packets(adapter_index: u8, filter: Option<FilterConfig>) {
     let mut errbuf = [0 as ::std::os::raw::c_char; 256];
     let errbuf_ptr = errbuf.as_mut_ptr();
 
@@ -221,17 +238,33 @@ pub fn read_packets(adapter_index: u8) {
         return;
     }
 
-    let mut dl = unsafe { pcap_datalink(handle) };
-    println!("pcap_datalink = {}", dl);
+    unsafe { FILTER = filter; }
 
     println!("Starting listening on the adapter.");
 
+    let running = Arc::new(AtomicBool::new(true));
+    let running_key = running.clone();
+
+    println!("Press Crtl+Q to stop listening.");
+    thread::spawn(move || {
+        while running_key.load(Ordering::Relaxed) {
+            if let Ok(Event::Key(KeyEvent { code, modifiers, .. })) = read() {
+                if code == KeyCode::Char('q') && modifiers.contains(KeyModifiers::CONTROL) {
+                    println!("Ctrl+Q pressed!");
+                    running_key.store(false, Ordering::Relaxed);
+                }
+            }
+        }
+    });
+
+    while running.load(Ordering::Relaxed) {
+        unsafe {
+            pcap_dispatch(handle, 0, Some(packet_handler), null_mut());
+        }
+    }
+
     unsafe {
-        pcap_loop(
-            handle,
-            0,
-            Some(packet_handler), 
-            (&mut dl as *mut i32) as *mut u_char,    
-        );
+        pcap_breakloop(handle);
+        println!("Stopping listening on the adapter.");
     }
 }

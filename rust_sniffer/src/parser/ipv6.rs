@@ -6,8 +6,8 @@ pub fn parse(data: &[u8]) {
     let version = data[0] >> 4;
 
     let next_header = data[6];
+    let hop_limit = data[7]; // IPv6 equivalent of TTL
 
-    let hop_limit = data[7];
 
     let src_ip = &data[8..24];
     let dst_ip = &data[24..40];
@@ -23,7 +23,7 @@ pub fn parse(data: &[u8]) {
     let payload = &data[40..];
     if !payload.is_empty() {
         match next_header {
-            6 => tcp::parse(payload),
+            6 => tcp::parse(payload, hop_limit),
             17 => udp::parse(payload),
             _ => {}
         }
