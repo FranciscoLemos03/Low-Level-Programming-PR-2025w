@@ -8,11 +8,16 @@ mod http_min;
 use decode::PacketEvent;
 use flow::{Direction, FlowKey, FlowState, TcpConnState};
 
+const IDLE_TIMEOUT_MS: u128 = 120_000;      // 120ms
+const HARD_TIMEOUT_MS: u128 = 5 * 60_000;   // 5 min
+const EVICT_EVERY_N_PACKETS: u64 = 500;     // Evict every 500 packets
+
 pub static GLOBAL: LazyLock<Mutex<Analyzer>> = LazyLock::new(|| Mutex::new(Analyzer::new()));
 
 pub struct Analyzer {
     flows: HashMap<FlowKey, FlowState>,
     packet_count: u64,
+    last_evict_at_packet: u64,
 }
 
 impl Analyzer {
@@ -20,6 +25,7 @@ impl Analyzer {
         Self {
             flows: HashMap::new(),
             packet_count: 0,
+            last_evict_at_packet: 0,
         }
     }
 
@@ -67,6 +73,30 @@ impl Analyzer {
         if self.packet_count % 200 == 0 {
             self.print_flow_summary(10);
         }
+
+        // Periodic eviction
+        if self.packet_count - self.last_evict_at_packet >= EVICT_EVERY_N_PACKETS {
+            self.last_evict_at_packet = self.packet_count;
+            let removed = self.evict_old_flows(ev.ts_ms);
+            if removed > 0 {
+                println!("🧹 Evicted {} stale flows (remaining: {})", removed, self.flows.len());
+            }
+        }
+
+    }
+
+    fn evict_old_flows(&mut self, now_ms: u128) -> usize {
+        let before = self.flows.len();
+
+        self.flows.retain(|_k, st| {
+            let idle = now_ms.saturating_sub(st.last_seen_ms);
+            let age  = now_ms.saturating_sub(st.first_seen_ms);
+
+            // Keep flow only if it's not idle-expired and not hard-expired
+            idle <= IDLE_TIMEOUT_MS && age <= HARD_TIMEOUT_MS
+        });
+
+        before - self.flows.len()
     }
 
     fn update_tcp_state(flow: &mut FlowState, f: decode::TcpFlags) {

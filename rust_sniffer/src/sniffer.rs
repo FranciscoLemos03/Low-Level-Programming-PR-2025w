@@ -76,13 +76,21 @@ fn protocol_to_string(proto: u8) -> &'static str {
 /// - pointers provided by libpcap
 /// - packet data valid for header.len bytes
 unsafe extern "C" fn packet_handler(
-    _param: *mut u_char,
+    param: *mut u_char,
     header: *const pcap_pkthdr,
     pkt_data: *const u_char,
 ) {
     if header.is_null() || pkt_data.is_null() {
         return;
     }
+
+    // Read datalink value (passed from read_packets)
+    let dl: i32 = if !param.is_null() {
+        *(param as *const i32)
+    } else {
+        // assuming Ethernet if not provided
+        1 
+    };
 
     let len = (*header).len as usize;
     let data_slice = unsafe { slice::from_raw_parts(pkt_data, len) };
@@ -95,13 +103,14 @@ unsafe extern "C" fn packet_handler(
     print!("[Time: {}.{}] ", sec, (*header).ts.tv_usec);
 
     // Update connection tracking
-    if let Some(ev) = analyzer::decode::decode_ipv4_tcp(ts_ms, data_slice) {
+    if let Some(ev) = analyzer::decode::decode_ipv4_tcp(ts_ms, data_slice, dl) {
         // IMPORTANT: Analyzer must not store ev.payload since it's borrowed.
         if let Ok(mut a) = analyzer::GLOBAL.lock() {
             a.on_packet(ev);
         }
     }
 
+    // Only parsing Ethernet currently
     parser::handle_packet(data_slice);
 }
 
@@ -212,12 +221,17 @@ pub fn read_packets(adapter_index: u8) {
         return;
     }
 
-    let dl = unsafe { pcap_datalink(handle) };
+    let mut dl = unsafe { pcap_datalink(handle) };
     println!("pcap_datalink = {}", dl);
 
     println!("Starting listening on the adapter.");
 
     unsafe {
-        pcap_loop(handle, 0, Some(packet_handler), null_mut());
+        pcap_loop(
+            handle,
+            0,
+            Some(packet_handler), 
+            (&mut dl as *mut i32) as *mut u_char,    
+        );
     }
 }

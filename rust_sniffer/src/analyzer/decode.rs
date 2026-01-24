@@ -30,30 +30,57 @@ pub struct PacketEvent<'a> {
 // !! Duplicate code as to not have merge conflicts, refactoring parser later
 /// Decode only what needed for flow tracking
 /// FOR NOW: Returns None if it's not Eth+IPv4+TCP
-pub fn decode_ipv4_tcp<'a>(ts_ms: u128, data: &'a [u8]) -> Option<PacketEvent<'a>> {
-    println!("Testing 0");
-    /*
-    data[..6]   : dest MAC
-    data[6..12] : src MAC
-    data[12..14]: EtherType
-    */
-    if data.len() < 14 {
-        return None;
-    }
-    let ether_type = u16::from_be_bytes([data[12], data[13]]);
+pub fn decode_ipv4_tcp<'a>(ts_ms: u128, data: &'a [u8], datalink: i32) -> Option<PacketEvent<'a>> {
     
-    // !!! Currently assuming everything is Ethernet !!!
-    // TODO: Add `match datalink { 1 => decode_eth, 0 => decode raw ipv4 tcp, ... }`
-    // NOTE: Loopback adapter (8) fails here => use 5
-    // (8) doesn't have physical link layer
-    // ==> Elif linktype == Loopback => Parse IP Directly
-    // IPv4 
-    if ether_type != 0x0800 {
-        return None;
-    }
+    // Picking where the IPv4 header starts depending on link type
+    let ip: &'a [u8] = match datalink {
+        // Ethernet
+        1 => {
+            /*
+            data[..6]   : dest MAC
+            data[6..12] : src MAC
+            data[12..14]: EtherType
+            */
+            if data.len() < 14 { return None; }
+            let ether_type = u16::from_be_bytes([data[12], data[13]]);
+            if ether_type != 0x0800 { return None; } // IPv4 only
+            &data[14..]
+        }
+
+        // DLT_NULL (0) / DLT_LOOP (often 12): 4-byte family header then IP.
+        // Family is typically AF_INET = 2, often host-endian in DLT_NULL.
+        0 | 12 => {
+            if data.len() < 4 { return None; }
+            let fam_ne = u32::from_ne_bytes([data[0], data[1], data[2], data[3]]);
+            let fam_swapped = fam_ne.swap_bytes();
+            let is_ipv4 = fam_ne == 2 || fam_swapped == 2;
+            if !is_ipv4 { return None; }
+            &data[4..]
+        }
+
+        // DLT_RAW (often 101): packet begins with IP header
+        101 => data,
+
+        // Unknown: try a best-effort fallback:
+        // - if looks like IPv4 header (version nibble == 4), treat as raw
+        // - else if looks like Ethernet+IPv4, treat as Ethernet
+        _ => {
+            if data.len() >= 1 && (data[0] >> 4) == 4 {
+                data
+            } else if data.len() >= 14 {
+                let ether_type = u16::from_be_bytes([data[12], data[13]]);
+                if ether_type == 0x0800 {
+                    &data[14..]
+                } else {
+                    return None;
+                }
+            } else {
+                return None;
+            }
+        }
+    };
 
     // IPv4 Header: >= 20 bytes
-    let ip = &data[14..];
     if ip.len() < 20 {
         return None;
     }
@@ -73,6 +100,7 @@ pub fn decode_ipv4_tcp<'a>(ts_ms: u128, data: &'a [u8]) -> Option<PacketEvent<'a
 
     let proto = ip[9];
     if proto != 6 {
+        // TODO: Track UDP
         // only TCP for flow tracking for now
         return None;
     }
