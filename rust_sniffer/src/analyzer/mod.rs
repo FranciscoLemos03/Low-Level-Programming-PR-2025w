@@ -8,7 +8,7 @@ mod http_min;
 use decode::PacketEvent;
 use flow::{Direction, FlowKey, FlowState, TcpConnState};
 
-const IDLE_TIMEOUT_MS: u128 = 120_000;      // 120ms
+const IDLE_TIMEOUT_MS: u128 = 120_000;      // 120s
 const HARD_TIMEOUT_MS: u128 = 5 * 60_000;   // 5 min
 const EVICT_EVERY_N_PACKETS: u64 = 500;     // Evict every 500 packets
 

@@ -15,8 +15,16 @@ use bindings::{
     pcap_pkthdr,
     u_char,
     pcap_breakloop,
-    pcap_dispatch};
+    pcap_dispatch,
+    pcap_datalink};
 use crate::parser;
+use crate::analyzer;
+
+#[repr(C)]
+struct CaptureCtx {
+    datalink: i32,
+    filter: Option<FilterConfig>,
+}
 
 #[derive(Debug)]
 pub struct FilterConfig {
@@ -96,23 +104,66 @@ unsafe extern "C" fn packet_handler(
         return;
     }
 
-    // Read datalink value (passed from read_packets)
-    let dl: i32 = if !param.is_null() {
-        *(param as *const i32)
+    // Read context passed from read_packets()
+    /* let datalink: i32 = if !param.is_null() {
+        let ctx = &*(param as *const CaptureCtx);
+        ctx.datalink
     } else {
-        // assuming Ethernet if not provided
-        1 
-    };
+        1 // fallback: assume Ethernet
+    }; */
+    let ctx = &*(param as *const CaptureCtx);
+    let datalink = ctx.datalink;
+    let filter = &ctx.filter;
 
     let len = (*header).len as usize;
     let data_slice = unsafe { slice::from_raw_parts(pkt_data, len) };
 
+    let sec_u128 = (*header).ts.tv_sec as u128;
+    let usec_u128 = (*header).ts.tv_usec as u128;
+    let ts_ms = sec_u128 * 1000 + (usec_u128 / 1000);
+
+    // Analyzer Connection tracking
+    /* if let Some(ev) = analyzer::decode::decode_ipv4_tcp(ts_ms, data_slice, datalink) {
+        if let Ok(mut a) = analyzer::GLOBAL.lock() {
+            a.on_packet(ev);
+        }
+    } */
+
     let sec = (*header).ts.tv_sec as u32;
     let usec = (*header).ts.tv_usec as u32;
 
+
+    // Changing filtering so as to apply to analyzer
     let proto = parser::get_protocol(data_slice);
     let (src_ip, dst_ip) = parser::get_ips(data_slice);
-    let print = unsafe {
+
+    // Decode once (also gives us ports for TCP)
+    let decoded_ev = analyzer::decode::decode_ipv4_tcp(ts_ms, data_slice, datalink);
+
+    let (src_port, dst_port) = if let Some(ref ev) = decoded_ev {
+        (Some(ev.src_port), Some(ev.dst_port))
+    } else {
+        (None, None)
+    };
+
+    let track = match filter {
+        None => true,
+        Some(fc) => should_track(fc, &proto, &src_ip, &dst_ip, src_port, dst_port),
+    };
+
+    // Track flow if it matches filter
+    if track {
+        if let Some(ev) = decoded_ev {
+            if let Ok(mut a) = analyzer::GLOBAL.lock() {
+                a.on_packet(ev);
+            }
+        }
+
+        // Print packet details too (optional)
+        print!("[Time: {}.{}] ", sec, usec);
+        parser::handle_packet(data_slice);
+    }
+    /* let print = unsafe {
         let f = &raw const FILTER;
         match *f {
             None => true,
@@ -123,11 +174,59 @@ unsafe extern "C" fn packet_handler(
                 proto_match && src_match && dst_match
             }
         }
-    };
+    }; */
 
-    if print {
+    /* if print {
         print!("[Time: {}.{}] ", sec, usec);
         parser::handle_packet(data_slice);
+    } */
+}
+
+fn should_track(
+    fc: &FilterConfig,
+    proto: &Option<String>,
+    src_ip: &Option<String>,
+    dst_ip: &Option<String>,
+    src_port: Option<u16>,
+    dst_port: Option<u16>,
+) -> bool {
+    // IP filters
+    let src_match = fc
+        .src_ip
+        .as_ref()
+        .map(|f| src_ip.as_ref() == Some(f))
+        .unwrap_or(true);
+
+    let dst_match = fc
+        .dst_ip
+        .as_ref()
+        .map(|f| dst_ip.as_ref() == Some(f))
+        .unwrap_or(true);
+
+    if !(src_match && dst_match) {
+        return false;
+    }
+
+    // protocol "all" means: only IP filters apply
+    if fc.protocol == "all" {
+        return true;
+    }
+
+    // For app-level filters, use ports (HTTP/HTTPS/DNS)
+    let p1 = src_port.unwrap_or(0);
+    let p2 = dst_port.unwrap_or(0);
+    let has_port = src_port.is_some() || dst_port.is_some();
+
+    match fc.protocol {
+        "http" => has_port && (p1 == 80 || p2 == 80 || p1 == 8080 || p2 == 8080),
+        "https" => has_port && (p1 == 443 || p2 == 443),
+        "dns" => has_port && (p1 == 53 || p2 == 53),
+
+        // For these, you might rely on IP protocol (if parser::get_protocol returns that)
+        "icmp" => proto.as_deref() == Some("icmp") || proto.as_deref() == Some("ICMP"),
+        "arp" => proto.as_deref() == Some("arp") || proto.as_deref() == Some("ARP"),
+
+        _ => true,
     }
 }
 
@@ -238,7 +337,14 @@ pub fn read_packets(adapter_index: u8, filter: Option<FilterConfig>) {
         return;
     }
 
-    unsafe { FILTER = filter; }
+    // Changing filtering to directly have filtering for the analyzer
+    // unsafe { FILTER = filter; }
+
+    let dl = unsafe { pcap_datalink(handle) };
+    println!("pcap_datalink = {}", dl);
+
+    let mut ctx = Box::new(CaptureCtx { datalink: dl, filter });
+    let user_ptr = (&mut *ctx as *mut CaptureCtx) as *mut u_char;
 
     println!("Starting listening on the adapter.");
 
@@ -259,7 +365,7 @@ pub fn read_packets(adapter_index: u8, filter: Option<FilterConfig>) {
 
     while running.load(Ordering::Relaxed) {
         unsafe {
-            pcap_dispatch(handle, 0, Some(packet_handler), null_mut());
+            pcap_dispatch(handle, 0, Some(packet_handler), user_ptr);
         }
     }
 
