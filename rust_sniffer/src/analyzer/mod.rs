@@ -6,7 +6,7 @@ pub mod flow;
 mod http_min;
 
 use decode::PacketEvent;
-use flow::{Direction, FlowKey, FlowState, TcpConnState};
+use flow::{Direction, FlowKey, FlowState, TcpConnState, L4Proto};
 
 const IDLE_TIMEOUT_MS: u128 = 120_000;      // 120s
 const HARD_TIMEOUT_MS: u128 = 5 * 60_000;   // 5 min
@@ -173,13 +173,18 @@ impl Analyzer {
         flows.reverse();
 
         for (i, (k, st)) in flows.into_iter().take(max).enumerate() {
+            let state_str = match k.proto {
+                L4Proto::Tcp => format!("{:?}", st.state),
+                L4Proto::Udp => "UDP".to_string(),
+            };
+
             println!(
-                "{}. {:?}  {}:{} <-> {}:{}  state={:?}  pkts(A->B/B->A)={}/{}  bytes={}/{}  HTTP(req/resp)={}/{}",
+                "{}. {:?}  {}:{} <-> {}:{}  state={}  pkts(A->B/B->A)={}/{}  bytes={}/{}  HTTP(req/resp)={}/{}",
                 i + 1,
                 k.proto,
                 k.a.ip, k.a.port,
                 k.b.ip, k.b.port,
-                st.state,
+                state_str,
                 st.packets_a2b, st.packets_b2a,
                 st.bytes_a2b, st.bytes_b2a,
                 st.http_requests.len(), st.http_responses.len()

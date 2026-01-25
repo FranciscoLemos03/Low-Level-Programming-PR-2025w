@@ -30,7 +30,7 @@ pub struct PacketEvent<'a> {
 // !! Duplicate code as to not have merge conflicts, refactoring parser later
 /// Decode only what needed for flow tracking
 /// FOR NOW: Returns None if it's not Eth+IPv4+TCP
-pub fn decode_ipv4_tcp<'a>(ts_ms: u128, data: &'a [u8], datalink: i32) -> Option<PacketEvent<'a>> {
+pub fn decode_ipv4_l4<'a>(ts_ms: u128, data: &'a [u8], datalink: i32) -> Option<PacketEvent<'a>> {
     
     // Picking where the IPv4 header starts depending on link type
     let ip: &'a [u8] = match datalink {
@@ -99,62 +99,81 @@ pub fn decode_ipv4_tcp<'a>(ts_ms: u128, data: &'a [u8], datalink: i32) -> Option
     }
 
     let proto = ip[9];
-    if proto != 6 {
-        // TODO: Track UDP
-        // only TCP for flow tracking for now
-        return None;
-    }
 
     let src_ip = Ipv4Addr::new(ip[12], ip[13], ip[14], ip[15]);
     let dst_ip = Ipv4Addr::new(ip[16], ip[17], ip[18], ip[19]);
 
     let l4 = &ip[ip_header_len..];
-    // TCP Header >= 20 bytes
-    if l4.len() < 20 {
-        return None;
+
+
+    match proto {
+        // TCP 
+        6 => {
+            // TCP Header >= 20 bytes
+            if l4.len() < 20 { return None; }
+
+            let src_port = u16::from_be_bytes([l4[0], l4[1]]);
+            let dst_port = u16::from_be_bytes([l4[2], l4[3]]);
+
+            // Check TCP header length is in data offset field: high nibble of byte 12
+            let data_offset_words = (l4[12] >> 4) as usize;
+            let tcp_header_len = data_offset_words * 4;
+            if l4.len() < tcp_header_len { return None; }
+
+            let flags = l4[13];
+            let tcp_flags = TcpFlags {
+                fin: flags & 0x01 != 0,
+                syn: flags & 0x02 != 0,
+                rst: flags & 0x04 != 0,
+                psh: flags & 0x08 != 0,
+                ack: flags & 0x10 != 0,
+            };
+
+            // Everything after the TCP header is application data 
+            let payload = &l4[tcp_header_len..];
+
+            let src = Endpoint { ip: IpAddr::V4(src_ip), port: src_port };
+            let dst = Endpoint { ip: IpAddr::V4(dst_ip), port: dst_port };
+            let (flow, dir) = FlowKey::new(L4Proto::Tcp, src, dst);
+
+            Some(PacketEvent {
+                ts_ms,
+                flow,
+                dir,
+                proto: L4Proto::Tcp,
+                src_port,
+                dst_port,
+                tcp_flags: Some(tcp_flags),
+                payload,
+            })
+        }
+
+        17 => {
+            // UDP
+            if l4.len() < 8 { return None; }
+
+            let src_port = u16::from_be_bytes([l4[0], l4[1]]);
+            let dst_port = u16::from_be_bytes([l4[2], l4[3]]);
+
+            // UDP header is fixed 8 bytes
+            let payload = &l4[8..];
+
+            let src = Endpoint { ip: IpAddr::V4(src_ip), port: src_port };
+            let dst = Endpoint { ip: IpAddr::V4(dst_ip), port: dst_port };
+            let (flow, dir) = FlowKey::new(L4Proto::Udp, src, dst);
+
+            Some(PacketEvent {
+                ts_ms,
+                flow,
+                dir,
+                proto: L4Proto::Udp,
+                src_port,
+                dst_port,
+                tcp_flags: None, // important
+                payload,
+            })
+        }
+
+        _ => None,
     }
-
-    let src_port = u16::from_be_bytes([l4[0], l4[1]]);
-    let dst_port = u16::from_be_bytes([l4[2], l4[3]]);
-
-    // Check TCP header length is in data offset field: high nibble of byte 12
-    let data_offset_words = (l4[12] >> 4) as usize;
-    let tcp_header_len = data_offset_words * 4;
-    if l4.len() < tcp_header_len {
-        return None;
-    }
-
-    let flags = l4[13];
-    let tcp_flags = TcpFlags {
-        fin: flags & 0x01 != 0,
-        syn: flags & 0x02 != 0,
-        rst: flags & 0x04 != 0,
-        psh: flags & 0x08 != 0,
-        ack: flags & 0x10 != 0,
-    };
-
-    // Everything after the TCP header is application data 
-    let payload = &l4[tcp_header_len..];
-
-    let src = Endpoint {
-        ip: IpAddr::V4(src_ip),
-        port: src_port,
-    };
-    let dst = Endpoint {
-        ip: IpAddr::V4(dst_ip),
-        port: dst_port,
-    };
-
-    let (flow, dir) = FlowKey::new(L4Proto::Tcp, src, dst);
-
-    Some(PacketEvent {
-        ts_ms,
-        flow,
-        dir,
-        proto: L4Proto::Tcp,
-        src_port,
-        dst_port,
-        tcp_flags: Some(tcp_flags),
-        payload,
-    })
 }

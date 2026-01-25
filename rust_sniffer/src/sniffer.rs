@@ -133,64 +133,35 @@ unsafe extern "C" fn packet_handler(
     let usec = (*header).ts.tv_usec as u32;
 
 
-    // Changing filtering so as to apply to analyzer
     let proto = parser::get_protocol(data_slice);
     let (src_ip, dst_ip) = parser::get_ips(data_slice);
 
-    // Decode once (also gives us ports for TCP)
-    let decoded_ev = analyzer::decode::decode_ipv4_tcp(ts_ms, data_slice, datalink);
-
-    let (src_port, dst_port) = if let Some(ref ev) = decoded_ev {
-        (Some(ev.src_port), Some(ev.dst_port))
-    } else {
-        (None, None)
-    };
-
-    let track = match filter {
+    let pass = match filter {
         None => true,
-        Some(fc) => should_track(fc, &proto, &src_ip, &dst_ip, src_port, dst_port),
+        Some(fc) => matches_filter(fc, &proto, &src_ip, &dst_ip),
     };
 
-    // Track flow if it matches filter
-    if track {
-        if let Some(ev) = decoded_ev {
+    if pass {
+        // Always allow printing for protocols the parser supports
+        print!("[Time: {}.{}] ", sec, usec);
+        parser::handle_packet(data_slice);
+
+        // Only update analyzer if we can decode TCP flow events
+        if let Some(ev) = analyzer::decode::decode_ipv4_l4(ts_ms, data_slice, datalink) {
             if let Ok(mut a) = analyzer::GLOBAL.lock() {
                 a.on_packet(ev);
             }
         }
-
-        // Print packet details too (optional)
-        print!("[Time: {}.{}] ", sec, usec);
-        parser::handle_packet(data_slice);
     }
-    /* let print = unsafe {
-        let f = &raw const FILTER;
-        match *f {
-            None => true,
-            Some(ref fc) => {
-                let proto_match = fc.protocol == "all" || proto.as_ref().map(|p| p == fc.protocol).unwrap_or(false);
-                let src_match = fc.src_ip.as_ref().map(|filter_ip| src_ip.as_ref() == Some(filter_ip)).unwrap_or(true);
-                let dst_match = fc.dst_ip.as_ref().map(|filter_ip| dst_ip.as_ref() == Some(filter_ip)).unwrap_or(true);
-                proto_match && src_match && dst_match
-            }
-        }
-    }; */
-
-    /* if print {
-        print!("[Time: {}.{}] ", sec, usec);
-        parser::handle_packet(data_slice);
-    } */
 }
 
-fn should_track(
+fn matches_filter(
     fc: &FilterConfig,
     proto: &Option<String>,
     src_ip: &Option<String>,
     dst_ip: &Option<String>,
-    src_port: Option<u16>,
-    dst_port: Option<u16>,
 ) -> bool {
-    // IP filters
+    // IP filters (IPv4 only, since get_ips ignores IPv6/ARP)
     let src_match = fc
         .src_ip
         .as_ref()
@@ -207,27 +178,13 @@ fn should_track(
         return false;
     }
 
-    // protocol "all" means: only IP filters apply
+    // Protocol filter
     if fc.protocol == "all" {
         return true;
     }
 
-    // For app-level filters, use ports (HTTP/HTTPS/DNS)
-    let p1 = src_port.unwrap_or(0);
-    let p2 = dst_port.unwrap_or(0);
-    let has_port = src_port.is_some() || dst_port.is_some();
-
-    match fc.protocol {
-        "http" => has_port && (p1 == 80 || p2 == 80 || p1 == 8080 || p2 == 8080),
-        "https" => has_port && (p1 == 443 || p2 == 443),
-        "dns" => has_port && (p1 == 53 || p2 == 53),
-
-        // For these, you might rely on IP protocol (if parser::get_protocol returns that)
-        "icmp" => proto.as_deref() == Some("icmp") || proto.as_deref() == Some("ICMP"),
-        "arp" => proto.as_deref() == Some("arp") || proto.as_deref() == Some("ARP"),
-
-        _ => true,
-    }
+    // Compare against parser protocol labels
+    proto.as_deref() == Some(fc.protocol)
 }
 
 /* ------------------------------------------------------------------------- */
