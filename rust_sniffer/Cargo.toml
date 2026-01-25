@@ -7,3 +7,4 @@ edition = "2024"
 bindings = { path = "../bindings" }
 
 crossterm = "0.27"
+pcap-file = "3.0.0-rc1"

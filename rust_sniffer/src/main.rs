@@ -11,7 +11,9 @@ fn main() {
     // Step 2: choose filter
     let filter_config = menu::menu();
 
-    sniffer::read_packets(adapter_index as u8, Some(filter_config));
+    let createDump = true;
+
+    sniffer::read_packets(adapter_index as u8, Some(filter_config), createDump);
 
 
     /****************************************/

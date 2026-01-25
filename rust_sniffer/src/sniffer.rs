@@ -1,8 +1,5 @@
 use std::{ffi::CStr, ptr::null_mut, slice};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, OnceLock};
 use std::thread;
 use crossterm::event::{read, Event, KeyCode, KeyEvent, KeyModifiers};
 use bindings::{
@@ -17,6 +14,9 @@ use bindings::{
     pcap_breakloop,
     pcap_dispatch};
 use crate::parser;
+use pcap_file::pcap::{PcapPacket, PcapWriter};
+use std::fs::File;
+use std::time::Duration;
 
 #[derive(Debug)]
 pub struct FilterConfig {
@@ -26,6 +26,8 @@ pub struct FilterConfig {
 }
 
 static mut FILTER: Option<FilterConfig> = None;
+static mut DUMP: bool = false;
+static PCAP_WRITER: OnceLock<Mutex<PcapWriter<File>>> = OnceLock::new();
 
 /// Timestamp (seconds + microseconds)
 pub struct TimeVal {
@@ -99,6 +101,23 @@ unsafe extern "C" fn packet_handler(
     let len = (*header).len as usize;
     let data_slice = unsafe { slice::from_raw_parts(pkt_data, len) };
 
+    if DUMP {
+        // LOGGING LOGIK
+        unsafe {
+            if let Some(mutex) = PCAP_WRITER.get() {
+                if let Ok(mut writer) = mutex.lock() {
+                    let packet = PcapPacket {
+                        timestamp: Duration::new((*header).ts.tv_sec as u64, ((*header).ts.tv_usec * 1000) as u32),
+                        orig_len: (*header).len,
+                        data: std::borrow::Cow::Borrowed(data_slice), // Nutzt das vorhandene Slice
+                    };
+
+                    let _ = writer.write_packet(&packet);
+                }
+            }
+        }
+    }
+
     let sec = (*header).ts.tv_sec as u32;
     let usec = (*header).ts.tv_usec as u32;
 
@@ -117,6 +136,7 @@ unsafe extern "C" fn packet_handler(
         }
     };
 
+    // magic
     if print {
         print!("[Time: {}.{}] ", sec, usec);
         parser::handle_packet(data_slice);
@@ -169,7 +189,8 @@ pub fn print_adapters() {
     }
 }
 
-pub fn read_packets(adapter_index: u8, filter: Option<FilterConfig>) {
+
+pub fn read_packets(adapter_index: u8, filter: Option<FilterConfig>, createDump : bool) {
     let mut errbuf = [0 as ::std::os::raw::c_char; 256];
     let errbuf_ptr = errbuf.as_mut_ptr();
 
@@ -230,7 +251,18 @@ pub fn read_packets(adapter_index: u8, filter: Option<FilterConfig>) {
         return;
     }
 
-    unsafe { FILTER = filter; }
+    unsafe {
+        FILTER = filter;
+        DUMP = createDump;
+
+        if DUMP {
+            let file = File::create("out.pcap").expect("Konnte Datei nicht erstellen");
+            let writer = PcapWriter::new(file).expect("Konnte PcapWriter nicht erstellen");
+
+            // In den globalen Speicher schieben
+            let _ = PCAP_WRITER.set(Mutex::new(writer));
+        }
+    }
 
     println!("Starting listening on the adapter.");
 
@@ -250,6 +282,7 @@ pub fn read_packets(adapter_index: u8, filter: Option<FilterConfig>) {
     });
 
     while running.load(Ordering::Relaxed) {
+
         unsafe {
             pcap_dispatch(handle, 0, Some(packet_handler), null_mut());
         }
@@ -257,6 +290,12 @@ pub fn read_packets(adapter_index: u8, filter: Option<FilterConfig>) {
 
     unsafe {
         pcap_breakloop(handle);
+        if let Some(mutex) = PCAP_WRITER.get() {
+            if let Ok(mut writer) = mutex.lock() {
+                // Erzwinge das Schreiben aller Pufferdaten auf die Festplatte
+                let _ = writer.flush();
+            }
+        }
         println!("Stopping listening on the adapter.");
     }
 }
