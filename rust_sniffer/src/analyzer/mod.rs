@@ -14,10 +14,26 @@ const EVICT_EVERY_N_PACKETS: u64 = 500;     // Evict every 500 packets
 
 pub static GLOBAL: LazyLock<Mutex<Analyzer>> = LazyLock::new(|| Mutex::new(Analyzer::new()));
 
+
+#[derive(Debug, Clone, Copy)]
+pub enum SortMode {
+    Recent,
+    Bytes,
+    Packets,
+    Duration,
+}
+
 pub struct Analyzer {
     flows: HashMap<FlowKey, FlowState>,
     packet_count: u64,
     last_evict_at_packet: u64,
+
+    // View toggle for printing
+    view_http_only: bool,
+    view_established_only: bool,
+
+    sort_mode: SortMode,
+    sort_reverse: bool,
 }
 
 impl Analyzer {
@@ -26,6 +42,10 @@ impl Analyzer {
             flows: HashMap::new(),
             packet_count: 0,
             last_evict_at_packet: 0,
+            view_http_only: false,
+            view_established_only: false,
+            sort_mode: SortMode::Recent,
+            sort_reverse: false,
         }
     }
 
@@ -45,6 +65,8 @@ impl Analyzer {
             rst_count: 0,
             http_requests: Vec::new(),
             http_responses: Vec::new(),
+            syn_dir: None,
+            synack_seen: false,
         });
 
         // update timestamps
@@ -65,14 +87,20 @@ impl Analyzer {
         
         // TCP state tracking
         if let Some(flags) = ev.tcp_flags {
-            Self::update_tcp_state(flow, flags);
+            Self::update_tcp_state(flow, ev.dir, flags);
             Self::maybe_track_http(flow, ev.ts_ms, ev.src_port, ev.dst_port, ev.payload);
+
+            // Fallback: if we missed SYN/SYNACK but see data, infer Established.
+            // This makes Established-only usable in real captures.
+            if flow.state == TcpConnState::New && flags.ack && !ev.payload.is_empty() {
+                flow.state = TcpConnState::Established;
+            }
         }
 
-        // print occasional summary -> Every 200 packets
+        /* // print occasional summary -> Every 200 packets
         if self.packet_count % 200 == 0 {
             self.print_flow_summary(10);
-        }
+        } */
 
         // Periodic eviction
         if self.packet_count - self.last_evict_at_packet >= EVICT_EVERY_N_PACKETS {
@@ -99,37 +127,65 @@ impl Analyzer {
         before - self.flows.len()
     }
 
-    fn update_tcp_state(flow: &mut FlowState, f: decode::TcpFlags) {
+
+    fn update_tcp_state(flow: &mut FlowState, dir: Direction, f: decode::TcpFlags) {
+        // RST always wins
         if f.rst {
             flow.rst_count += 1;
             flow.state = TcpConnState::Reset;
+            // reset handshake tracking (optional)
+            flow.syn_dir = None;
+            flow.synack_seen = false;
             return;
         }
 
-        if f.syn {
-            flow.syn_count += 1;
-        }
-        if f.fin {
-            flow.fin_count += 1;
-        }
+        if f.syn { flow.syn_count += 1; }
+        if f.fin { flow.fin_count += 1; }
 
         // A simple but useful state machine:
         flow.state = match flow.state {
             TcpConnState::New => {
+                // Initial SYN from initiator (SYN set, ACK not set)
                 if f.syn && !f.ack {
-                    TcpConnState::SynSeen // first SYN
+                    flow.syn_dir = Some(dir);
+                    flow.synack_seen = false;
+                    TcpConnState::SynSeen
                 } else {
                     TcpConnState::New
                 }
             }
+
             TcpConnState::SynSeen => {
-                // SYN+ACK or ACK indicates handshake completion
-                if (f.syn && f.ack) || f.ack {
-                    TcpConnState::Established
+                // If we never recorded syn_dir (edge case), learn it
+                if flow.syn_dir.is_none() && f.syn && !f.ack {
+                    flow.syn_dir = Some(dir);
+                }
+
+                // We want SYN+ACK from the opposite direction
+                if f.syn && f.ack {
+                    if let Some(init_dir) = flow.syn_dir {
+                        if dir == init_dir.opposite() {
+                            flow.synack_seen = true;
+                        }
+                    }
+                    TcpConnState::SynSeen
+                }
+                // Final ACK from initiator direction after SYN+ACK
+                else if f.ack && !f.syn {
+                    if let Some(init_dir) = flow.syn_dir {
+                        if flow.synack_seen && dir == init_dir {
+                            TcpConnState::Established
+                        } else {
+                            TcpConnState::SynSeen
+                        }
+                    } else {
+                        TcpConnState::SynSeen
+                    }
                 } else {
                     TcpConnState::SynSeen
                 }
             }
+
             TcpConnState::Established => {
                 if f.fin {
                     TcpConnState::FinSeen
@@ -137,16 +193,22 @@ impl Analyzer {
                     TcpConnState::Established
                 }
             }
+
             TcpConnState::FinSeen => {
-                if f.fin {
+                // You can optionally require FIN from both directions;
+                // but for demo purposes this is good enough.
+                if f.ack {
                     TcpConnState::Closed
                 } else {
                     TcpConnState::FinSeen
                 }
             }
-            other => other,
+
+            TcpConnState::Closed => TcpConnState::Closed,
+            TcpConnState::Reset => TcpConnState::Reset,
         };
     }
+
 
     fn maybe_track_http(flow: &mut FlowState, ts_ms: u128, src_port: u16, dst_port: u16, payload: &[u8]) {
         // treat port 80 or 8080 as HTTP
@@ -165,26 +227,88 @@ impl Analyzer {
     }
 
     pub fn print_flow_summary(&self, max: usize) {
-        println!("\n===== Flow table (top {}) =====", max);
+        println!(
+            "\n===== Flow table (top {}) [sort={:?} {}] [web-view only={}] [established_only={}] =====",
+            max,
+            self.sort_mode,
+            if self.sort_reverse { "asc" } else { "desc" },
+            self.view_http_only,
+            self.view_established_only
+        );
 
-        // Print a few flows, sorted by last_seen (most recent)
+        // Sort flows
         let mut flows: Vec<_> = self.flows.iter().collect();
-        flows.sort_by_key(|(_, st)| st.last_seen_ms);
-        flows.reverse();
 
-        for (i, (k, st)) in flows.into_iter().take(max).enumerate() {
+        flows.sort_by(|a, b| {
+            let (_ka, sa) = a;
+            let (_kb, sb) = b;
+
+            let key_a = match self.sort_mode {
+                SortMode::Recent => sb.last_seen_ms.cmp(&sa.last_seen_ms), // note: default desc
+                SortMode::Bytes => {
+                    let ta = sa.bytes_a2b + sa.bytes_b2a;
+                    let tb = sb.bytes_a2b + sb.bytes_b2a;
+                    tb.cmp(&ta)
+                }
+                SortMode::Packets => {
+                    let ta = sa.packets_a2b + sa.packets_b2a;
+                    let tb = sb.packets_a2b + sb.packets_b2a;
+                    tb.cmp(&ta)
+                }
+                SortMode::Duration => {
+                    let da = sa.last_seen_ms.saturating_sub(sa.first_seen_ms);
+                    let db = sb.last_seen_ms.saturating_sub(sb.first_seen_ms);
+                    db.cmp(&da)
+                }
+            };
+
+            if self.sort_reverse { key_a.reverse() } else { key_a }
+        });
+
+        for (i, (k, st)) in flows.into_iter()
+            .filter(|(k, st)| {
+                // Established-only: TCP only
+                if self.view_established_only {
+                    if k.proto != L4Proto::Tcp { return false; }
+                    if !(st.state == TcpConnState::Established || st.state == TcpConnState::SynSeen) {
+                        return false;
+                    }
+                }
+
+                // HTTP-only: show flows that look like HTTP (by port) or have parsed HTTP
+                if self.view_http_only {
+                    let is_web_port =
+                    matches!(k.a.port, 80 | 8080 | 443) || matches!(k.b.port, 80 | 8080 | 443);
+
+                    let has_http = !st.http_requests.is_empty() || !st.http_responses.is_empty();
+
+                    if self.view_http_only && !(is_web_port || has_http) {
+                        return false;
+                    }
+                }
+
+                true
+            })
+            .take(max)
+            .enumerate() 
+        {
             let state_str = match k.proto {
                 L4Proto::Tcp => format!("{:?}", st.state),
                 L4Proto::Udp => "UDP".to_string(),
+                L4Proto::Icmp => "ICMP".to_string(),
             };
 
+            let dur_ms = st.last_seen_ms.saturating_sub(st.first_seen_ms);
+            let dur_s = dur_ms as f64 / 1000.0;
+
             println!(
-                "{}. {:?}  {}:{} <-> {}:{}  state={}  pkts(A->B/B->A)={}/{}  bytes={}/{}  HTTP(req/resp)={}/{}",
+                "{}. {:?}  {}:{} <-> {}:{}  state={}  dur={:.1}s  pkts(A->B/B->A)={}/{}  bytes={}/{}  HTTP(req/resp)={}/{}",
                 i + 1,
                 k.proto,
                 k.a.ip, k.a.port,
                 k.b.ip, k.b.port,
                 state_str,
+                dur_s,
                 st.packets_a2b, st.packets_b2a,
                 st.bytes_a2b, st.bytes_b2a,
                 st.http_requests.len(), st.http_responses.len()
@@ -200,5 +324,45 @@ impl Analyzer {
         }
 
         println!("===== End flow table =====\n");
+    }
+
+
+
+    // Public methods for keybinds
+    pub fn print_now(&self) {
+        self.print_flow_summary(10);
+    }
+
+    pub fn clear(&mut self) {
+        self.flows.clear();
+        self.packet_count = 0;
+        self.last_evict_at_packet = 0;
+    }
+
+    pub fn toggle_http_only(&mut self) {
+        self.view_http_only = !self.view_http_only;
+        println!("🔎 HTTP-only view: {}", self.view_http_only);
+    }
+
+    pub fn toggle_established_only(&mut self) {
+        self.view_established_only = !self.view_established_only;
+        println!("🔒 Established-only view: {}", self.view_established_only);
+    }
+
+
+    // Sorting
+    pub fn cycle_sort_mode(&mut self) {
+        self.sort_mode = match self.sort_mode {
+            SortMode::Recent => SortMode::Bytes,
+            SortMode::Bytes => SortMode::Packets,
+            SortMode::Packets => SortMode::Duration,
+            SortMode::Duration => SortMode::Recent,
+        };
+        println!("↕️ sort mode: {:?}", self.sort_mode);
+    }
+
+    pub fn toggle_sort_reverse(&mut self) {
+        self.sort_reverse = !self.sort_reverse;
+        println!("↕️ sort reverse: {}", self.sort_reverse);
     }
 }

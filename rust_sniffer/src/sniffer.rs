@@ -2,9 +2,11 @@ use std::{ffi::CStr, ptr::null_mut, slice};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
+    mpsc
 };
 use std::thread;
-use crossterm::event::{read, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{poll, read, Event, KeyCode, KeyEvent, KeyModifiers, KeyEventKind};
+use crossterm::terminal::{enable_raw_mode, disable_raw_mode};
 use bindings::{
     pcap_if_t,
     pcap_findalldevs_ex,
@@ -19,11 +21,25 @@ use bindings::{
     pcap_datalink};
 use crate::parser;
 use crate::analyzer;
+use std::time::Duration;
+
+enum UiCmd {
+    ToggleMode,
+    PrintTable,
+    ToggleHttpOnly,
+    ToggleEstablishedOnly,
+    Clear,
+    Help,
+    Quit,
+    CycleSort,
+    ToggleSortReverse,
+}
 
 #[repr(C)]
 struct CaptureCtx {
     datalink: i32,
     filter: Option<FilterConfig>,
+    print_packets: AtomicBool,
 }
 
 #[derive(Debug)]
@@ -112,6 +128,7 @@ unsafe extern "C" fn packet_handler(
         1 // fallback: assume Ethernet
     }; */
     let ctx = &*(param as *const CaptureCtx);
+    let do_print = ctx.print_packets.load(Ordering::Relaxed);
     let datalink = ctx.datalink;
     let filter = &ctx.filter;
 
@@ -142,9 +159,11 @@ unsafe extern "C" fn packet_handler(
     };
 
     if pass {
-        // Always allow printing for protocols the parser supports
-        print!("[Time: {}.{}] ", sec, usec);
-        parser::handle_packet(data_slice);
+        if do_print {
+            // Always allow printing for protocols the parser supports
+            print!("[Time: {}.{}] ", sec, usec);
+            parser::handle_packet(data_slice);
+        }
 
         // Only update analyzer if we can decode TCP flow events
         if let Some(ev) = analyzer::decode::decode_ipv4_l4(ts_ms, data_slice, datalink) {
@@ -300,21 +319,47 @@ pub fn read_packets(adapter_index: u8, filter: Option<FilterConfig>) {
     let dl = unsafe { pcap_datalink(handle) };
     println!("pcap_datalink = {}", dl);
 
-    let mut ctx = Box::new(CaptureCtx { datalink: dl, filter });
+    let mut ctx = Box::new(CaptureCtx { datalink: dl, filter, print_packets: AtomicBool::new(true) });
     let user_ptr = (&mut *ctx as *mut CaptureCtx) as *mut u_char;
 
     println!("Starting listening on the adapter.");
 
+    enable_raw_mode().ok();
+
+    let (tx, rx) = mpsc::channel::<UiCmd>();
+
     let running = Arc::new(AtomicBool::new(true));
     let running_key = running.clone();
 
-    println!("Press Crtl+Q to stop listening.");
+    println!("Keys: m=mode, t=table, s=sort, r=reverse, w=web-view, e=established-only, c=clear, ?=help, Ctrl+Q=quit");
+    let tx_key = tx.clone();
     thread::spawn(move || {
         while running_key.load(Ordering::Relaxed) {
-            if let Ok(Event::Key(KeyEvent { code, modifiers, .. })) = read() {
-                if code == KeyCode::Char('q') && modifiers.contains(KeyModifiers::CONTROL) {
-                    println!("Ctrl+Q pressed!");
-                    running_key.store(false, Ordering::Relaxed);
+            if poll(Duration::from_millis(50)).unwrap_or(false) {
+                if let Ok(Event::Key(KeyEvent { code, modifiers, kind, .. })) = read() {
+                    if kind != KeyEventKind::Press {
+                        continue;
+                    }
+                    
+                    // Quit
+                    if code == KeyCode::Char('q') && modifiers.contains(KeyModifiers::CONTROL) {
+                        let _ = tx_key.send(UiCmd::Quit);
+                        running_key.store(false, Ordering::Relaxed);
+                        continue;
+                    }
+
+                    // Single-key commands
+                    match code {
+                        KeyCode::Char('m') => { let _ = tx_key.send(UiCmd::ToggleMode); }
+                        KeyCode::Char('t') => { let _ = tx_key.send(UiCmd::PrintTable); }
+                        KeyCode::Char('w') => { let _ = tx_key.send(UiCmd::ToggleHttpOnly); }
+                        KeyCode::Char('e') => { let _ = tx_key.send(UiCmd::ToggleEstablishedOnly); }
+                        KeyCode::Char('c') => { let _ = tx_key.send(UiCmd::Clear); }
+                        KeyCode::Char('?') => { let _ = tx_key.send(UiCmd::Help); }
+                        KeyCode::Char('s') => { let _ = tx_key.send(UiCmd::CycleSort); }
+                        KeyCode::Char('r') => { let _ = tx_key.send(UiCmd::ToggleSortReverse); }
+                        _ => {}
+                    }
                 }
             }
         }
@@ -324,9 +369,59 @@ pub fn read_packets(adapter_index: u8, filter: Option<FilterConfig>) {
         unsafe {
             pcap_dispatch(handle, 0, Some(packet_handler), user_ptr);
         }
+
+        while let Ok(cmd) = rx.try_recv() {
+                match cmd {
+                    UiCmd::ToggleMode => {
+                        let old = ctx.print_packets.load(Ordering::Relaxed);
+                        ctx.print_packets.store(!old, Ordering::Relaxed);
+                        println!("Mode: {}", if old { "FLOWS" } else { "PACKETS" });
+                    }
+                    UiCmd::PrintTable => {
+                        if let Ok(a) = analyzer::GLOBAL.lock() {
+                            a.print_now();
+                        }
+                    }
+                    UiCmd::ToggleHttpOnly => {
+                        if let Ok(mut a) = analyzer::GLOBAL.lock() {
+                            a.toggle_http_only();
+                        }
+                    }
+                    UiCmd::ToggleEstablishedOnly => {
+                        if let Ok(mut a) = analyzer::GLOBAL.lock() {
+                            a.toggle_established_only();
+                        }
+                    }
+                    UiCmd::Clear => {
+                        if let Ok(mut a) = analyzer::GLOBAL.lock() {
+                            a.clear();
+                            println!("🧽 Cleared flows");
+                        }
+                    }
+                    UiCmd::Help => {
+                        println!("Keys: m=mode, t=table, s=sort, r=reverse, w=web-view, e=established-only, c=clear, ?=help, Ctrl+Q=quit");
+                    }
+                    UiCmd::Quit => {
+                        running.store(false, Ordering::Relaxed);
+                    }
+                    UiCmd::CycleSort => {
+                        if let Ok(mut a) = analyzer::GLOBAL.lock() {
+                            a.cycle_sort_mode();
+                            a.print_now();
+                        }
+                    }
+                    UiCmd::ToggleSortReverse => {
+                        if let Ok(mut a) = analyzer::GLOBAL.lock() {
+                            a.toggle_sort_reverse();
+                            a.print_now();
+                        }
+                    }
+                }
+            }
     }
 
     unsafe {
+        disable_raw_mode().ok();
         pcap_breakloop(handle);
         println!("Stopping listening on the adapter.");
     }

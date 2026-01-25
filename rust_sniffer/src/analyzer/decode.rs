@@ -174,6 +174,25 @@ pub fn decode_ipv4_l4<'a>(ts_ms: u128, data: &'a [u8], datalink: i32) -> Option<
             })
         }
 
+        1 => {
+            // ICMP (ping)
+            if l4.len() < 4 { return None; } // type, code, checksum...
+            let src = Endpoint { ip: IpAddr::V4(src_ip), port: 0 };
+            let dst = Endpoint { ip: IpAddr::V4(dst_ip), port: 0 };
+            let (flow, dir) = FlowKey::new(L4Proto::Icmp, src, dst);
+
+            Some(PacketEvent {
+                ts_ms,
+                flow,
+                dir,
+                proto: L4Proto::Icmp,
+                src_port: 0,
+                dst_port: 0,
+                tcp_flags: None,
+                payload: l4, // or &l4[4..] if you prefer
+            })
+        }
+
         _ => None,
     }
 }

@@ -5,6 +5,7 @@ use std::net::IpAddr;
 pub enum L4Proto {
     Tcp,
     Udp,
+    Icmp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -27,6 +28,15 @@ pub struct FlowKey {
     pub proto: L4Proto,
 }
 
+impl Direction {
+    pub fn opposite(self) -> Direction {
+        match self {
+            Direction::AToB => Direction::BToA,
+            Direction::BToA => Direction::AToB,
+        }
+    }
+}
+
 impl FlowKey {
     /// Build a canonical flow key and return the packet direction.
     /// Use Direction to tell which way the packet went
@@ -46,7 +56,7 @@ impl FlowKey {
     }   
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TcpConnState {
     New,
     SynSeen,
@@ -89,4 +99,8 @@ pub struct FlowState {
     // Minimal HTTP tracking:
     pub http_requests: Vec<HttpRequestSummary>,
     pub http_responses: Vec<HttpResponseSummary>,
+
+    // Direction-aware handshake tracking (TCP only)
+    pub syn_dir: Option<Direction>, // direction of the initial SYN (no ACK)
+    pub synack_seen: bool,          // did we see SYN+ACK in the opposite direction?
 }
