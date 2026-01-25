@@ -11,8 +11,8 @@ A packet sniffer written in Rust that captures and analyzes network traffic in r
 - IP address filters (source and/or destination IP)
 - Simple command-line interface
 - Support for multiple network adapters
-- **Connection tracking / flow analysis (TCP & UDP)**
-- **Interactive flow table with keybindings**
+- Connection tracking / flow analysis (TCP & UDP)
+- Interactive flow table with keybindings
 
 ## How to Run
 
@@ -59,6 +59,11 @@ A packet sniffer written in Rust that captures and analyzes network traffic in r
 During capture, additional keybindings are available: 
 - `m` - toggle packet view / flow analyzer view
 - `t` - print flow table
+- `s` - cycle sort modes:
+   - recent (last seen)
+   - bytes total
+   - packets total
+- `r` - reverse sort order
 - `w` - toggle web view (http/https)
 - `e` - toggle established-only TCP connections
 - `c` - clear tracked flows
