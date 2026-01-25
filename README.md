@@ -11,6 +11,8 @@ A packet sniffer written in Rust that captures and analyzes network traffic in r
 - IP address filters (source and/or destination IP)
 - Simple command-line interface
 - Support for multiple network adapters
+- **Connection tracking / flow analysis (TCP & UDP)**
+- **Interactive flow table with keybindings**
 
 ## How to Run
 
@@ -53,18 +55,29 @@ A packet sniffer written in Rust that captures and analyzes network traffic in r
 6. If yes, enter destination IP (or 'none' to skip)
 7. Press Ctrl+Q to stop capturing
 
+### Flow Analyzer Controls
+During capture, additional keybindings are available: 
+- `m` - toggle packet view / flow analyzer view
+- `t` - print flow table
+- `w` - toggle web view (http/https)
+- `e` - toggle established-only TCP connections
+- `c` - clear tracked flows
+- `?` - show help
+
+
 ## Architecture and Program Logic
 
 ### Execution Flow
 
 ```
-main.rs -> menu.rs -> sniffer.rs -> parser/
+main.rs -> menu.rs -> sniffer.rs -> parser/ -> analyzer/
 ```
 
 1. **main.rs**: Entry point, coordinates adapter and filter selection
 2. **menu.rs**: Interface for adapter and protocol filter selection
 3. **sniffer.rs**: Manages packet capture using libpcap
 4. **parser/**: Modules for network protocol analysis
+5. **analyzer/**: Connection tracking, flow state management, and statistics
 
 ### Capture and Filtering Logic
 
@@ -80,6 +93,13 @@ main.rs -> menu.rs -> sniffer.rs -> parser/
 |   (raw data)   |     | -> TCP/UDP ->   |     | matches filter  |
 |                |     | Application     |     +-----------------+
 +----------------+     +-----------------+
+                               |                                                
+                               v                                                
+                       +-----------------+ 
+                       | Flow Analyzer   |
+                       | (connections,   |
+                       | states, stats)  |
+                       +-----------------+
 ```
 
 #### Technical Details
@@ -91,7 +111,14 @@ main.rs -> menu.rs -> sniffer.rs -> parser/
   - TCP/UDP (ports and flags)
   - Application (HTTP headers, etc.)
 - **Filtering**: Before displaying, determines packet protocol and IP addresses, then compares with selected filters
+- **Connection Tracking**:  
+   - Flows are identified by `(protocol, src IP, src port, dst IP, dst port)`
+   - Bidirectional flows are unified into a single entry
+   - TCP state machine tracks connection states (New, SynSeen, Established, FinSeen, Closed, Reset)
+   - Per-flow statistics: packets, bytes, timestamps, and HTTP activity
 - **Interruption**: Separate thread monitors Ctrl+Q to stop capture
+
+
 
 ### Supported Protocols
 
