@@ -13,7 +13,7 @@ pub fn parse(data: &[u8]) {
     let dst_ip = &data[24..40];
 
     println!(
-        "  [IPv6] {:02x}{:02x}:{:02x}{:02x}... -> {:02x}{:02x}:{:02x}{:02x}... | Next: {} | Hop: {}",
+        "  [IPv6] {:02x}{:02x}:...:{:02x}{:02x} -> {:02x}{:02x}:...:{:02x}{:02x} | Next: {} | Hop: {}",
         src_ip[0], src_ip[1], src_ip[14], src_ip[15],
         dst_ip[0], dst_ip[1], dst_ip[14], dst_ip[15],
         next_header,
