@@ -335,7 +335,7 @@ pub fn read_packets(adapter_index: u8, filter: Option<FilterConfig>) {
     let tx_key = tx.clone();
     thread::spawn(move || {
         while running_key.load(Ordering::Relaxed) {
-            if poll(Duration::from_millis(50)).unwrap_or(false) {
+            // if poll(Duration::from_millis(50)).unwrap_or(false) {
                 if let Ok(Event::Key(KeyEvent { code, modifiers, kind, .. })) = read() {
                     if kind != KeyEventKind::Press {
                         continue;
@@ -361,7 +361,7 @@ pub fn read_packets(adapter_index: u8, filter: Option<FilterConfig>) {
                         _ => {}
                     }
                 }
-            }
+            // }
         }
     });
 
