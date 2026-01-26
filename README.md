@@ -140,12 +140,20 @@ main.rs -> menu.rs -> sniffer.rs -> parser/ -> analyzer/
 
 If you want to build fresh bindings.rs:
 
+1. Make sure that bindgen CLI tool is installed via `cargo install bindgen-cli`
+2. Make sure to include the path for `bindgen` executable into the `PATH` environment variable, e.g., add `~/.cargo/bin` to the `PATH` environment variable 
+3. Download Npcap SDK from https://npcap.com/#download
+4. Unzip the archive into a folder
+5. Open terminal window (powershell / bash) in that folder
+5. Run below command
+
 On Linux:
 ```sh
-bindgen Include/pcap.h -- -target x86_64-pc-windows-gnu -I[FULL-PATH]/Include
+bindgen ./Include/pcap.h -- -target x86_64-pc-windows-gnu -I ./Include > lib.rs
 ```
 
 On Windows:
 ```sh
-bindgen Include/pcap.h -- -I ./Include
+bindgen ./Include/pcap.h -- -I ./Include > lib.rs
 ```
+6. The bindings will be saved into the `lib.rs` file.
