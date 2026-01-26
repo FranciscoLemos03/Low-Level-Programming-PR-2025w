@@ -5,7 +5,7 @@ A packet sniffer written in Rust that captures and analyzes network traffic in r
 
 ## Features
 
-- Real-time packet capture using WinPcap/Npcap
+- Real-time packet capture using Npcap
 - Network protocol analysis (Ethernet, IPv4, TCP, UDP, HTTP, HTTPS, DNS, ICMP, ARP)
 - Protocol filters (HTTP, HTTPS, DNS, ICMP, ARP or all traffic)
 - IP address filters (source and/or destination IP)
@@ -19,7 +19,7 @@ A packet sniffer written in Rust that captures and analyzes network traffic in r
 ### Prerequisites
 
 - Rust (installed via rustup)
-- WinPcap or Npcap (for packet capture on Windows)
+- Npcap (for packet capture on Windows)
 - Administrator permissions (for network adapter access)
 
 ### Build and Run
