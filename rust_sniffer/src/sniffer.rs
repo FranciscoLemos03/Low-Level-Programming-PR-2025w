@@ -17,6 +17,7 @@ use crate::parser;
 use pcap_file::pcap::{PcapPacket, PcapWriter};
 use std::fs::File;
 use std::time::Duration;
+use chrono::Local;
 
 #[derive(Debug)]
 pub struct FilterConfig {
@@ -101,23 +102,6 @@ unsafe extern "C" fn packet_handler(
     let len = (*header).len as usize;
     let data_slice = unsafe { slice::from_raw_parts(pkt_data, len) };
 
-    if DUMP {
-        // LOGGING LOGIK
-        unsafe {
-            if let Some(mutex) = PCAP_WRITER.get() {
-                if let Ok(mut writer) = mutex.lock() {
-                    let packet = PcapPacket {
-                        timestamp: Duration::new((*header).ts.tv_sec as u64, ((*header).ts.tv_usec * 1000) as u32),
-                        orig_len: (*header).len,
-                        data: std::borrow::Cow::Borrowed(data_slice), // Nutzt das vorhandene Slice
-                    };
-
-                    let _ = writer.write_packet(&packet);
-                }
-            }
-        }
-    }
-
     let sec = (*header).ts.tv_sec as u32;
     let usec = (*header).ts.tv_usec as u32;
 
@@ -136,8 +120,23 @@ unsafe extern "C" fn packet_handler(
         }
     };
 
-    // magic
     if print {
+        unsafe {
+            if DUMP {
+                if let Some(mutex) = PCAP_WRITER.get() {
+                    if let Ok(mut writer) = mutex.lock() {
+                        let packet = PcapPacket {
+                            timestamp: Duration::new((*header).ts.tv_sec as u64, ((*header).ts.tv_usec * 1000) as u32),
+                            orig_len: (*header).len,
+                            data: std::borrow::Cow::Borrowed(data_slice),
+                        };
+
+                        let _ = writer.write_packet(&packet);
+                    }
+                }
+            }
+        }
+
         print!("[Time: {}.{}] ", sec, usec);
         parser::handle_packet(data_slice);
     }
@@ -256,10 +255,13 @@ pub fn read_packets(adapter_index: u8, filter: Option<FilterConfig>, createDump 
         DUMP = createDump;
 
         if DUMP {
-            let file = File::create("out.pcap").expect("Konnte Datei nicht erstellen");
-            let writer = PcapWriter::new(file).expect("Konnte PcapWriter nicht erstellen");
+            let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
+            let filename = format!("capture_{}.pcap", timestamp);
+            let full_path = format!("./dumps/{}", filename);
 
-            // In den globalen Speicher schieben
+            let file = File::create(&full_path).expect("Error creating dump file");
+            let writer = PcapWriter::new(file).expect("Error creating pcap writer");
+
             let _ = PCAP_WRITER.set(Mutex::new(writer));
         }
     }
@@ -292,7 +294,6 @@ pub fn read_packets(adapter_index: u8, filter: Option<FilterConfig>, createDump 
         pcap_breakloop(handle);
         if let Some(mutex) = PCAP_WRITER.get() {
             if let Ok(mut writer) = mutex.lock() {
-                // Erzwinge das Schreiben aller Pufferdaten auf die Festplatte
                 let _ = writer.flush();
             }
         }

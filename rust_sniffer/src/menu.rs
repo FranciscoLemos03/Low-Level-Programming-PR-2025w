@@ -109,6 +109,25 @@ fn choose_ip_filters() -> (Option<String>, Option<String>) {
     }
 }
 
+
+pub fn dump_file_dialog() -> bool {
+    loop {
+        println!("\n--- CREATE A DUMP FILE? ---");
+        println!("Do you want to create an output dump file (pcap format)? (y/n)");
+
+        let choice = read_input("Choice: ").to_lowercase();
+
+        match choice.as_str() {
+            "y" | "yes" => {
+                return true;
+            }
+            "n" | "no" => return false,
+            _ => println!("❌ Please enter 'y' or 'n'."),
+        }
+    }
+}
+
+
 fn choose_ip(ip_type: &str) -> Option<String> {
     loop {
         println!("\n--- {} IP Filter ---", ip_type);
