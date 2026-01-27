@@ -55,16 +55,11 @@ fn guess_os(ttl: u8, window_size: u16, flags: u8) -> String {
     // 1. Identify OS Family by TTL Ceiling
     let os_family = if ttl <= 64 {
         match window_size {
-            64240 | 29200 | 5840 => "Linux (Modern Kernel)",
             65535 => "FreeBSD/macOS",
-            _ => "Linux/Unix (Generic)"
+            _     => "Linux (Modern Kernel)"
         }
     } else if ttl <= 128 {
-        match window_size {
-            8192 => "Windows (Fixed Win)",
-            64240 | 65535 => "Windows (Autotuning)",
-            _ => "Windows (Generic)"
-        }
+        "Windows"
     } else if ttl <= 255 {
         "Network Device (Cisco/Solaris)"
     } else {
