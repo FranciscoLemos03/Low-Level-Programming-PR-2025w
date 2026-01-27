@@ -1,4 +1,5 @@
 use crate::parser::{tcp, udp};
+use std::net::Ipv6Addr;
 
 pub fn parse(data: &[u8]) {
     if data.len() < 40 { return; }
@@ -8,14 +9,13 @@ pub fn parse(data: &[u8]) {
     let next_header = data[6];
     let hop_limit = data[7]; // IPv6 equivalent of TTL
 
-
-    let src_ip = &data[8..24];
-    let dst_ip = &data[24..40];
+    let src_addr = Ipv6Addr::from(<[u8; 16]>::try_from(&data[8..24]).unwrap());
+    let dst_addr = Ipv6Addr::from(<[u8; 16]>::try_from(&data[24..40]).unwrap());
 
     println!(
-        "  [IPv6] {:02x}{:02x}:...:{:02x}{:02x} -> {:02x}{:02x}:...:{:02x}{:02x} | Next: {} | Hop: {}",
-        src_ip[0], src_ip[1], src_ip[14], src_ip[15],
-        dst_ip[0], dst_ip[1], dst_ip[14], dst_ip[15],
+        "  [IPv6] {} -> {} | Next: {} | Hop: {}",
+        src_addr,
+        dst_addr,
         next_header,
         hop_limit
     );
