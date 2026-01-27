@@ -1,9 +1,5 @@
 use std::{ffi::CStr, ptr::null_mut, slice};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-    mpsc
-};
+use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, OnceLock, mpsc};
 use std::thread;
 use crossterm::event::{poll, read, Event, KeyCode, KeyEvent, KeyModifiers, KeyEventKind};
 use crossterm::terminal::{enable_raw_mode, disable_raw_mode};
@@ -20,8 +16,12 @@ use bindings::{
     pcap_dispatch,
     pcap_datalink};
 use crate::parser;
-use crate::analyzer;
+use pcap_file::pcap::{PcapPacket, PcapWriter};
+use std::fs::File;
 use std::time::Duration;
+use chrono::Local;
+
+use crate::analyzer;
 
 enum UiCmd {
     ToggleMode,
@@ -50,6 +50,8 @@ pub struct FilterConfig {
 }
 
 static mut FILTER: Option<FilterConfig> = None;
+static mut DUMP: bool = false;
+static PCAP_WRITER: OnceLock<Mutex<PcapWriter<File>>> = OnceLock::new();
 
 /// Timestamp (seconds + microseconds)
 pub struct TimeVal {
@@ -159,6 +161,22 @@ unsafe extern "C" fn packet_handler(
     };
 
     if pass {
+        unsafe {
+            if DUMP {
+                if let Some(mutex) = PCAP_WRITER.get() {
+                    if let Ok(mut writer) = mutex.lock() {
+                        let packet = PcapPacket {
+                            timestamp: Duration::new((*header).ts.tv_sec as u64, ((*header).ts.tv_usec * 1000) as u32),
+                            orig_len: (*header).len,
+                            data: std::borrow::Cow::Borrowed(data_slice),
+                        };
+
+                        let _ = writer.write_packet(&packet);
+                    }
+                }
+            }
+        }
+
         if do_print {
             // Always allow printing for protocols the parser supports
             print!("[Time: {}.{}] ", sec, usec);
@@ -252,7 +270,8 @@ pub fn print_adapters() {
     }
 }
 
-pub fn read_packets(adapter_index: u8, filter: Option<FilterConfig>) {
+
+pub fn read_packets(adapter_index: u8, filter: Option<FilterConfig>, createDump : bool) {
     let mut errbuf = [0 as ::std::os::raw::c_char; 256];
     let errbuf_ptr = errbuf.as_mut_ptr();
 
@@ -316,6 +335,21 @@ pub fn read_packets(adapter_index: u8, filter: Option<FilterConfig>) {
     // Changing filtering to directly have filtering for the analyzer
     // unsafe { FILTER = filter; }
 
+    unsafe {
+        DUMP = createDump;
+
+        if DUMP {
+            let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
+            let filename = format!("capture_{}.pcap", timestamp);
+            let full_path = format!("./dumps/{}", filename);
+
+            let file = File::create(&full_path).expect("Error creating dump file");
+            let writer = PcapWriter::new(file).expect("Error creating pcap writer");
+
+            let _ = PCAP_WRITER.set(Mutex::new(writer));
+        }
+    }
+
     let dl = unsafe { pcap_datalink(handle) };
     println!("pcap_datalink = {}", dl);
 
@@ -340,7 +374,7 @@ pub fn read_packets(adapter_index: u8, filter: Option<FilterConfig>) {
                     if kind != KeyEventKind::Press {
                         continue;
                     }
-                    
+
                     // Quit
                     if code == KeyCode::Char('q') && modifiers.contains(KeyModifiers::CONTROL) {
                         let _ = tx_key.send(UiCmd::Quit);
@@ -423,6 +457,11 @@ pub fn read_packets(adapter_index: u8, filter: Option<FilterConfig>) {
     unsafe {
         disable_raw_mode().ok();
         pcap_breakloop(handle);
+        if let Some(mutex) = PCAP_WRITER.get() {
+            if let Ok(mut writer) = mutex.lock() {
+                let _ = writer.flush();
+            }
+        }
         println!("Stopping listening on the adapter.");
     }
 }
