@@ -9,10 +9,6 @@ pub fn parse(data: &[u8]) {
     let next_header = data[6];
     let hop_limit = data[7]; // IPv6 equivalent of TTL
 
-
-    let src_ip = &data[8..24];
-    let dst_ip = &data[24..40];
-
     let src_addr = Ipv6Addr::from(<[u8; 16]>::try_from(&data[8..24]).unwrap());
     let dst_addr = Ipv6Addr::from(<[u8; 16]>::try_from(&data[24..40]).unwrap());
 

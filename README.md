@@ -5,19 +5,21 @@ A packet sniffer written in Rust that captures and analyzes network traffic in r
 
 ## Features
 
-- Real-time packet capture using WinPcap/Npcap
+- Real-time packet capture using Npcap
 - Network protocol analysis (Ethernet, IPv4, TCP, UDP, HTTP, HTTPS, DNS, ICMP, ARP)
 - Protocol filters (HTTP, HTTPS, DNS, ICMP, ARP or all traffic)
 - IP address filters (source and/or destination IP)
 - Simple command-line interface
 - Support for multiple network adapters
+- Connection tracking / flow analysis (TCP & UDP)
+- Interactive flow table with keybindings
 
 ## How to Run
 
 ### Prerequisites
 
 - Rust (installed via rustup)
-- WinPcap or Npcap (for packet capture on Windows)
+- Npcap (for packet capture on Windows)
 - Administrator permissions (for network adapter access)
 
 ### Build and Run
@@ -53,18 +55,34 @@ A packet sniffer written in Rust that captures and analyzes network traffic in r
 6. If yes, enter destination IP (or 'none' to skip)
 7. Press Ctrl+Q to stop capturing
 
+### Flow Analyzer Controls
+During capture, additional keybindings are available: 
+- `m` - toggle packet view / flow analyzer view
+- `t` - print flow table
+- `s` - cycle sort modes:
+   - recent (last seen)
+   - bytes total
+   - packets total
+- `r` - reverse sort order
+- `w` - toggle web view (http/https)
+- `e` - toggle established-only TCP connections
+- `c` - clear tracked flows
+- `?` - show help
+
+
 ## Architecture and Program Logic
 
 ### Execution Flow
 
 ```
-main.rs -> menu.rs -> sniffer.rs -> parser/
+main.rs -> menu.rs -> sniffer.rs -> parser/ -> analyzer/
 ```
 
 1. **main.rs**: Entry point, coordinates adapter and filter selection
 2. **menu.rs**: Interface for adapter and protocol filter selection
 3. **sniffer.rs**: Manages packet capture using libpcap
 4. **parser/**: Modules for network protocol analysis
+5. **analyzer/**: Connection tracking, flow state management, and statistics
 
 ### Capture and Filtering Logic
 
@@ -80,6 +98,13 @@ main.rs -> menu.rs -> sniffer.rs -> parser/
 |   (raw data)   |     | -> TCP/UDP ->   |     | matches filter  |
 |                |     | Application     |     +-----------------+
 +----------------+     +-----------------+
+                               |                                                
+                               v                                                
+                       +-----------------+ 
+                       | Flow Analyzer   |
+                       | (connections,   |
+                       | states, stats)  |
+                       +-----------------+
 ```
 
 #### Technical Details
@@ -91,7 +116,14 @@ main.rs -> menu.rs -> sniffer.rs -> parser/
   - TCP/UDP (ports and flags)
   - Application (HTTP headers, etc.)
 - **Filtering**: Before displaying, determines packet protocol and IP addresses, then compares with selected filters
+- **Connection Tracking**:  
+   - Flows are identified by `(protocol, src IP, src port, dst IP, dst port)`
+   - Bidirectional flows are unified into a single entry
+   - TCP state machine tracks connection states (New, SynSeen, Established, FinSeen, Closed, Reset)
+   - Per-flow statistics: packets, bytes, timestamps, and HTTP activity
 - **Interruption**: Separate thread monitors Ctrl+Q to stop capture
+
+
 
 ### Supported Protocols
 
@@ -108,12 +140,20 @@ main.rs -> menu.rs -> sniffer.rs -> parser/
 
 If you want to build fresh bindings.rs:
 
+1. Make sure that bindgen CLI tool is installed via `cargo install bindgen-cli`
+2. Make sure to include the path for `bindgen` executable into the `PATH` environment variable, e.g., add `~/.cargo/bin` to the `PATH` environment variable 
+3. Download Npcap SDK from https://npcap.com/#download
+4. Unzip the archive into a folder
+5. Open terminal window (powershell / bash) in that folder
+5. Run below command
+
 On Linux:
 ```sh
-bindgen Include/pcap.h -- -target x86_64-pc-windows-gnu -I[FULL-PATH]/Include
+bindgen ./Include/pcap.h -- -target x86_64-pc-windows-gnu -I ./Include > lib.rs
 ```
 
 On Windows:
 ```sh
-bindgen Include/pcap.h -- -I ./Include
+bindgen ./Include/pcap.h -- -I ./Include > lib.rs
 ```
+6. The bindings will be saved into the `lib.rs` file.

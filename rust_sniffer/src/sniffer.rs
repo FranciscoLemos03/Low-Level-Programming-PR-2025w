@@ -1,7 +1,8 @@
 use std::{ffi::CStr, ptr::null_mut, slice};
-use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, OnceLock};
+use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, OnceLock, mpsc};
 use std::thread;
-use crossterm::event::{read, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{poll, read, Event, KeyCode, KeyEvent, KeyModifiers, KeyEventKind};
+use crossterm::terminal::{enable_raw_mode, disable_raw_mode};
 use bindings::{
     pcap_if_t,
     pcap_findalldevs_ex,
@@ -12,12 +13,34 @@ use bindings::{
     pcap_pkthdr,
     u_char,
     pcap_breakloop,
-    pcap_dispatch};
+    pcap_dispatch,
+    pcap_datalink};
 use crate::parser;
 use pcap_file::pcap::{PcapPacket, PcapWriter};
 use std::fs::File;
 use std::time::Duration;
 use chrono::Local;
+
+use crate::analyzer;
+
+enum UiCmd {
+    ToggleMode,
+    PrintTable,
+    ToggleHttpOnly,
+    ToggleEstablishedOnly,
+    Clear,
+    Help,
+    Quit,
+    CycleSort,
+    ToggleSortReverse,
+}
+
+#[repr(C)]
+struct CaptureCtx {
+    datalink: i32,
+    filter: Option<FilterConfig>,
+    print_packets: AtomicBool,
+}
 
 #[derive(Debug)]
 pub struct FilterConfig {
@@ -91,7 +114,7 @@ fn protocol_to_string(proto: u8) -> &'static str {
 /// - pointers provided by libpcap
 /// - packet data valid for header.len bytes
 unsafe extern "C" fn packet_handler(
-    _param: *mut u_char,
+    param: *mut u_char,
     header: *const pcap_pkthdr,
     pkt_data: *const u_char,
 ) {
@@ -99,28 +122,45 @@ unsafe extern "C" fn packet_handler(
         return;
     }
 
+    // Read context passed from read_packets()
+    /* let datalink: i32 = if !param.is_null() {
+        let ctx = &*(param as *const CaptureCtx);
+        ctx.datalink
+    } else {
+        1 // fallback: assume Ethernet
+    }; */
+    let ctx = &*(param as *const CaptureCtx);
+    let do_print = ctx.print_packets.load(Ordering::Relaxed);
+    let datalink = ctx.datalink;
+    let filter = &ctx.filter;
+
     let len = (*header).len as usize;
     let data_slice = unsafe { slice::from_raw_parts(pkt_data, len) };
+
+    let sec_u128 = (*header).ts.tv_sec as u128;
+    let usec_u128 = (*header).ts.tv_usec as u128;
+    let ts_ms = sec_u128 * 1000 + (usec_u128 / 1000);
+
+    // Analyzer Connection tracking
+    /* if let Some(ev) = analyzer::decode::decode_ipv4_tcp(ts_ms, data_slice, datalink) {
+        if let Ok(mut a) = analyzer::GLOBAL.lock() {
+            a.on_packet(ev);
+        }
+    } */
 
     let sec = (*header).ts.tv_sec as u32;
     let usec = (*header).ts.tv_usec as u32;
 
+
     let proto = parser::get_protocol(data_slice);
     let (src_ip, dst_ip) = parser::get_ips(data_slice);
-    let print = unsafe {
-        let f = &raw const FILTER;
-        match *f {
-            None => true,
-            Some(ref fc) => {
-                let proto_match = fc.protocol == "all" || proto.as_ref().map(|p| p == fc.protocol).unwrap_or(false);
-                let src_match = fc.src_ip.as_ref().map(|filter_ip| src_ip.as_ref() == Some(filter_ip)).unwrap_or(true);
-                let dst_match = fc.dst_ip.as_ref().map(|filter_ip| dst_ip.as_ref() == Some(filter_ip)).unwrap_or(true);
-                proto_match && src_match && dst_match
-            }
-        }
+
+    let pass = match filter {
+        None => true,
+        Some(fc) => matches_filter(fc, &proto, &src_ip, &dst_ip),
     };
 
-    if print {
+    if pass {
         unsafe {
             if DUMP {
                 if let Some(mutex) = PCAP_WRITER.get() {
@@ -137,9 +177,51 @@ unsafe extern "C" fn packet_handler(
             }
         }
 
-        print!("[Time: {}.{}] ", sec, usec);
-        parser::handle_packet(data_slice);
+        if do_print {
+            // Always allow printing for protocols the parser supports
+            print!("[Time: {}.{}] ", sec, usec);
+            parser::handle_packet(data_slice);
+        }
+
+        // Only update analyzer if we can decode TCP flow events
+        if let Some(ev) = analyzer::decode::decode_ipv4_l4(ts_ms, data_slice, datalink) {
+            if let Ok(mut a) = analyzer::GLOBAL.lock() {
+                a.on_packet(ev);
+            }
+        }
     }
+}
+
+fn matches_filter(
+    fc: &FilterConfig,
+    proto: &Option<String>,
+    src_ip: &Option<String>,
+    dst_ip: &Option<String>,
+) -> bool {
+    // IP filters (IPv4 only, since get_ips ignores IPv6/ARP)
+    let src_match = fc
+        .src_ip
+        .as_ref()
+        .map(|f| src_ip.as_ref() == Some(f))
+        .unwrap_or(true);
+
+    let dst_match = fc
+        .dst_ip
+        .as_ref()
+        .map(|f| dst_ip.as_ref() == Some(f))
+        .unwrap_or(true);
+
+    if !(src_match && dst_match) {
+        return false;
+    }
+
+    // Protocol filter
+    if fc.protocol == "all" {
+        return true;
+    }
+
+    // Compare against parser protocol labels
+    proto.as_deref() == Some(fc.protocol)
 }
 
 /* ------------------------------------------------------------------------- */
@@ -250,8 +332,10 @@ pub fn read_packets(adapter_index: u8, filter: Option<FilterConfig>, createDump 
         return;
     }
 
+    // Changing filtering to directly have filtering for the analyzer
+    // unsafe { FILTER = filter; }
+
     unsafe {
-        FILTER = filter;
         DUMP = createDump;
 
         if DUMP {
@@ -266,31 +350,112 @@ pub fn read_packets(adapter_index: u8, filter: Option<FilterConfig>, createDump 
         }
     }
 
+    let dl = unsafe { pcap_datalink(handle) };
+    println!("pcap_datalink = {}", dl);
+
+    let mut ctx = Box::new(CaptureCtx { datalink: dl, filter, print_packets: AtomicBool::new(true) });
+    let user_ptr = (&mut *ctx as *mut CaptureCtx) as *mut u_char;
+
     println!("Starting listening on the adapter.");
+
+    enable_raw_mode().ok();
+
+    let (tx, rx) = mpsc::channel::<UiCmd>();
 
     let running = Arc::new(AtomicBool::new(true));
     let running_key = running.clone();
 
-    println!("Press Crtl+Q to stop listening.");
+    println!("Keys: m=mode, t=table, s=sort, r=reverse, w=web-view, e=established-only, c=clear, ?=help, Ctrl+Q=quit");
+    let tx_key = tx.clone();
     thread::spawn(move || {
         while running_key.load(Ordering::Relaxed) {
-            if let Ok(Event::Key(KeyEvent { code, modifiers, .. })) = read() {
-                if code == KeyCode::Char('q') && modifiers.contains(KeyModifiers::CONTROL) {
-                    println!("Ctrl+Q pressed!");
-                    running_key.store(false, Ordering::Relaxed);
+            // if poll(Duration::from_millis(50)).unwrap_or(false) {
+                if let Ok(Event::Key(KeyEvent { code, modifiers, kind, .. })) = read() {
+                    if kind != KeyEventKind::Press {
+                        continue;
+                    }
+
+                    // Quit
+                    if code == KeyCode::Char('q') && modifiers.contains(KeyModifiers::CONTROL) {
+                        let _ = tx_key.send(UiCmd::Quit);
+                        running_key.store(false, Ordering::Relaxed);
+                        continue;
+                    }
+
+                    // Single-key commands
+                    match code {
+                        KeyCode::Char('m') => { let _ = tx_key.send(UiCmd::ToggleMode); }
+                        KeyCode::Char('t') => { let _ = tx_key.send(UiCmd::PrintTable); }
+                        KeyCode::Char('w') => { let _ = tx_key.send(UiCmd::ToggleHttpOnly); }
+                        KeyCode::Char('e') => { let _ = tx_key.send(UiCmd::ToggleEstablishedOnly); }
+                        KeyCode::Char('c') => { let _ = tx_key.send(UiCmd::Clear); }
+                        KeyCode::Char('?') => { let _ = tx_key.send(UiCmd::Help); }
+                        KeyCode::Char('s') => { let _ = tx_key.send(UiCmd::CycleSort); }
+                        KeyCode::Char('r') => { let _ = tx_key.send(UiCmd::ToggleSortReverse); }
+                        _ => {}
+                    }
                 }
-            }
+            // }
         }
     });
 
     while running.load(Ordering::Relaxed) {
-
         unsafe {
-            pcap_dispatch(handle, 0, Some(packet_handler), null_mut());
+            pcap_dispatch(handle, 0, Some(packet_handler), user_ptr);
         }
+
+        while let Ok(cmd) = rx.try_recv() {
+                match cmd {
+                    UiCmd::ToggleMode => {
+                        let old = ctx.print_packets.load(Ordering::Relaxed);
+                        ctx.print_packets.store(!old, Ordering::Relaxed);
+                        println!("Mode: {}", if old { "FLOWS" } else { "PACKETS" });
+                    }
+                    UiCmd::PrintTable => {
+                        if let Ok(a) = analyzer::GLOBAL.lock() {
+                            a.print_now();
+                        }
+                    }
+                    UiCmd::ToggleHttpOnly => {
+                        if let Ok(mut a) = analyzer::GLOBAL.lock() {
+                            a.toggle_http_only();
+                        }
+                    }
+                    UiCmd::ToggleEstablishedOnly => {
+                        if let Ok(mut a) = analyzer::GLOBAL.lock() {
+                            a.toggle_established_only();
+                        }
+                    }
+                    UiCmd::Clear => {
+                        if let Ok(mut a) = analyzer::GLOBAL.lock() {
+                            a.clear();
+                            println!("🧽 Cleared flows");
+                        }
+                    }
+                    UiCmd::Help => {
+                        println!("Keys: m=mode, t=table, s=sort, r=reverse, w=web-view, e=established-only, c=clear, ?=help, Ctrl+Q=quit");
+                    }
+                    UiCmd::Quit => {
+                        running.store(false, Ordering::Relaxed);
+                    }
+                    UiCmd::CycleSort => {
+                        if let Ok(mut a) = analyzer::GLOBAL.lock() {
+                            a.cycle_sort_mode();
+                            a.print_now();
+                        }
+                    }
+                    UiCmd::ToggleSortReverse => {
+                        if let Ok(mut a) = analyzer::GLOBAL.lock() {
+                            a.toggle_sort_reverse();
+                            a.print_now();
+                        }
+                    }
+                }
+            }
     }
 
     unsafe {
+        disable_raw_mode().ok();
         pcap_breakloop(handle);
         if let Some(mutex) = PCAP_WRITER.get() {
             if let Ok(mut writer) = mutex.lock() {
